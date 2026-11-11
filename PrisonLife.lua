@@ -1,6 +1,6 @@
 --[[
     ================================================================================
-    🚔 PRISON LIFE — ULTIMATE 2026 SCRIPT (PC & MOBILE)
+    🚔 PRISON LIFE — ULTIMATE 2026 SCRIPT (PC & MOBILE) [v1.1 BUGFIX PATCH]
     ================================================================================
     Target Game : Prison Life (PlaceId: 155615604 | UniverseId: 73885730)
     Patch Target: October/November 2026 ("Sniper Update!" & New Remotes/Attributes)
@@ -8,19 +8,22 @@
                   Touch Aim Assist, & On-Screen Vehicle Fly Joystick)
     UI Library  : WindUI (Latest Release with Mobile OpenButton & PC RightShift)
 
-    verified 2026 Remotes & Systems Used:
-      • ReplicatedStorage.Remotes.RequestTeamChange (RemoteFunction: InvokeServer(Team, 1))
-      • ReplicatedStorage.Remotes.GiverPressed      (RemoteEvent: FireServer(TouchGiverModel))
-      • ReplicatedStorage.Remotes.InteractWithItem  (RemoteFunction: InvokeServer(Part))
-      • ReplicatedStorage.Remotes.ArrestPlayer      (RemoteFunction: InvokeServer(Player, 1))
-      • ReplicatedStorage.Remotes.ClientArrested    (RemoteEvent: OnClientEvent)
-      • ReplicatedStorage.Remotes.EatFood           (RemoteEvent: FireServer())
-      • ReplicatedStorage.Remotes.C4.ActivateC4     (RemoteFunction: InvokeServer())
-      • ReplicatedStorage.GunRemotes.PlayerTased    (RemoteEvent: OnClientEvent)
-      • ReplicatedStorage.meleeEvent                (RemoteEvent: FireServer(Player, 1, 1))
-      • PlayerGui.Home.hud.ActionArea               (Upvalue Hook for Shoot, Reload, Bullet)
-      • Tool Attributes: ToolType, FireRate, SpreadRadius, AutoFire, Range,
-                         Local_CurrentAmmo, Local_IsShooting, Local_ReloadSession
+    Fixes in v1.1 (From Mobile Gameplay Video Review):
+      1. Fixed giant colored 3D cubes blocking camera when ExpandHitbox + ESP Highlight
+         are both active (HumanoidRootPart.Transparency is now locked at 1 so Roblox
+         Highlight never outlines the enlarged hitbox box).
+      2. Fixed Silent Aim & Triggerbot breaking after respawn (prevented double-hooking
+         GunController's persistent pl.Bullet function on CharacterAdded, added live
+         target acquisition inside the Bullet hook, and fixed Triggerbot's inputObj
+         UserInputState.End transition so it fires continuously).
+      3. Fixed FE Invisible getting stuck tilted in the floor / desynced GhostOutline
+         (uses weight 0.001 + full Animator track cleanup + part transparency restore
+         + synced Mobile button & WindUI toggle).
+      4. Fixed MaxSpeed rubberbanding indoors (uses the exact 20 indoor sub-regions
+         and prison yard boxes with native Humanoid.WalkSpeed + Jump bypass, and
+         properly restores WalkSpeed = 16 when toggled off).
+      5. Fixed WindUI Dropdown table/string value normalization & compact distance-scaled
+         ESP nametags so crowded areas don't clutter the screen.
     ================================================================================
 ]]
 
@@ -39,7 +42,6 @@ local Teams = game:GetService("Teams")
 local Workspace = game:GetService("Workspace")
 local CoreGui = game:GetService("CoreGui")
 local StarterGui = game:GetService("StarterGui")
-local TextChatService = game:GetService("TextChatService")
 
 local LocalPlayer = Players.LocalPlayer
 local Camera = Workspace.CurrentCamera
@@ -61,6 +63,14 @@ local function GetSafeGuiParent()
     end)
     if ok2 and cg then return cg end
     return LocalPlayer:WaitForChild("PlayerGui")
+end
+
+-- // Normalize WindUI Dropdown Values (Handles both string and table return types)
+local function NormalizeDropdownValue(v)
+    if type(v) == "table" then
+        return v[1] or v.Value or next(v) or ""
+    end
+    return tostring(v or "")
 end
 
 -- // Connections & Cleanup Registry
@@ -119,7 +129,7 @@ local State = {
     AimAssistTeamCheck = true,
 
     Triggerbot = false,
-    TriggerbotDelay = 0.03,
+    TriggerbotDelay = 0.05,
     TriggerbotWallcheck = true,
     TriggerbotAutoReload = true,
 
@@ -130,8 +140,7 @@ local State = {
     KillAuraFaceTarget = false,
 
     ExpandHitbox = false,
-    HitboxSize = 8,
-    HitboxTransparency = 0.65,
+    HitboxSize = 10,
 
     AntiRiotShield = false,
     VehicleWallbang = false,
@@ -144,7 +153,6 @@ local State = {
     AutoReload = false,
     AutoReloadHotSwap = false,
     FastSwitch = false,
-    MobileFastSwitchButton = false,
 
     GunMods = false,
     GunFireRateSPS = 22,      -- Shots per second (FireRate = 1 / SPS)
@@ -168,7 +176,7 @@ local State = {
     KeepPositionOnRespawn = true,
     OpenAllDoors = false,
     FenceGodmode = false,
-    AntiKillPlane = false,
+    AntiKillPlane = true,
     AutoDetonateC4 = false,
 
     -- Vehicles & Trolling
@@ -176,7 +184,7 @@ local State = {
     VehicleFlySpeed = 85,
     VehicleSpeedMod = false,
     VehicleSpeedMult = 2.2,
-    AntiFling = false,
+    AntiFling = true,
     VehicleFling = false,
     VehicleFlingTarget = "All",
     FEInvisible = false,
@@ -200,7 +208,6 @@ local State = {
     ESPDistance = true,
     ESPWeapon = true,
     ESPStatusFlags = true,
-    ESPTracers = false,
     C4ESP = false,
     KillFeedNotifier = false,
 }
@@ -217,7 +224,7 @@ local function Notify(title, content, duration)
             WindUI:Notify({
                 Title = title,
                 Content = content,
-                Duration = duration or 4,
+                Duration = duration or 3.5,
                 Icon = "shield-alert",
             })
         end)
@@ -226,85 +233,14 @@ local function Notify(title, content, duration)
             StarterGui:SetCore("SendNotification", {
                 Title = title,
                 Text = content,
-                Duration = duration or 4,
+                Duration = duration or 3.5,
             })
         end)
     end
 end
 
 -- ============================================================================
--- // SECTION 1: 2026 GUN CONTROLLER UPVALUE HOOK (SILENT AIM / TRIGGERBOT / RELOAD)
--- ============================================================================
-local GunHook = {
-    Ready = false,
-    Shoot = nil,
-    Reload = nil,
-    Bullet = nil,
-    Equip = nil,
-    OldBullet = nil,
-    CurrentSilentTargetPart = nil,
-}
-
-local function SetupGunControllerHooks()
-    if not getconnections or not debug or not debug.getupvalue then
-        return false
-    end
-    local ok, err = pcall(function()
-        local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
-        local home = pg and pg:FindFirstChild("Home")
-        local hud = home and home:FindFirstChild("hud")
-        local actionArea = hud and hud:FindFirstChild("ActionArea")
-        if not actionArea then return end
-
-        for _, conn in ipairs(getconnections(actionArea.InputBegan)) do
-            if conn.Function then
-                local shootFn = debug.getupvalue(conn.Function, 2)
-                if type(shootFn) == "function" then
-                    GunHook.Shoot = shootFn
-                    pcall(function() GunHook.Reload = debug.getupvalue(shootFn, 2) end)
-                    pcall(function() GunHook.Bullet = debug.getupvalue(shootFn, 16) end)
-                    GunHook.Ready = true
-                    break
-                end
-            end
-        end
-
-        if GunHook.Bullet and hookfunction and not GunHook.OldBullet then
-            GunHook.OldBullet = hookfunction(GunHook.Bullet, function(...)
-                local args = { ... }
-                if State.SilentAim and GunHook.CurrentSilentTargetPart then
-                    if math.random(1, 100) <= State.SilentAimHitChance then
-                        local targetPart = GunHook.CurrentSilentTargetPart
-                        if targetPart and targetPart.Parent then
-                            args[2] = targetPart.Position
-                            args[3] = 0 -- Zero spread on silent aim shot
-                        end
-                    end
-                elseif State.GunMods and State.GunNoSpread then
-                    args[3] = 0
-                end
-                return GunHook.OldBullet(unpack(args))
-            end)
-        end
-    end)
-    return ok and GunHook.Ready
-end
-
-task.spawn(function()
-    for _ = 1, 10 do
-        if SetupGunControllerHooks() then break end
-        task.wait(1)
-    end
-end)
-
-AddConnection(LocalPlayer.CharacterAdded:Connect(function()
-    task.wait(1.2)
-    GunHook.OldBullet = nil
-    SetupGunControllerHooks()
-end))
-
--- ============================================================================
--- // SECTION 2: TARGET VALIDATION & RAYCAST HELPERS
+-- // SECTION 1: TARGET VALIDATION & RAYCAST HELPERS
 -- ============================================================================
 local function GetCharacter(plr)
     return plr and plr.Character
@@ -327,7 +263,7 @@ local function IsValidCombatTarget(plr, requireHostileForGuard)
     if char:FindFirstChildOfClass("ForceField") then return false end
 
     local hum = GetHumanoid(char)
-    if not hum or hum.Health <= 0 then return false end
+    if not hum or hum.Health <= 0 or hum:GetState() == Enum.HumanoidStateType.Dead then return false end
 
     if State.SilentAimSkipDowned and (char:GetAttribute("Downed") or char:GetAttribute("Arrested")) then
         return false
@@ -351,6 +287,9 @@ end
 local WallRayParams = RaycastParams.new()
 WallRayParams.FilterType = Enum.RaycastFilterType.Exclude
 WallRayParams.IgnoreWater = true
+pcall(function()
+    WallRayParams.CollisionGroup = "ClientBullet"
+end)
 
 local function HasLineOfSight(originPos, targetPart, targetChar)
     local myChar = LocalPlayer.Character
@@ -358,7 +297,7 @@ local function HasLineOfSight(originPos, targetPart, targetChar)
     if State.VehicleWallbang and Workspace:FindFirstChild("CarContainer") then
         table.insert(ignore, Workspace.CarContainer)
     end
-    if Workspace:FindFirstChild("Doors") then
+    if State.OpenAllDoors and Workspace:FindFirstChild("Doors") then
         table.insert(ignore, Workspace.Doors)
     end
     WallRayParams.FilterDescendantsInstances = ignore
@@ -406,7 +345,101 @@ local function GetBestScreenTarget(fovRadius, aimPartName, wallcheck, requireHos
     return bestPart, bestPlr
 end
 
--- // FOV Overlay GUI (Works on both PC & Mobile without requiring Drawing API)
+-- ============================================================================
+-- // SECTION 2: 2026 GUN CONTROLLER UPVALUE HOOK (SILENT AIM / TRIGGERBOT / RELOAD)
+-- ============================================================================
+local GunHook = {
+    Ready = false,
+    IsHooked = false,
+    Shoot = nil,
+    Reload = nil,
+    Bullet = nil,
+    ShootParams = nil,
+    OldBullet = nil,
+    CurrentSilentTargetPart = nil,
+}
+
+local function SetupGunControllerHooks()
+    if not getconnections or not debug or not debug.getupvalue then
+        return false
+    end
+
+    pcall(function()
+        local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+        local home = pg and pg:FindFirstChild("Home")
+        local hud = home and home:FindFirstChild("hud")
+        local actionArea = hud and hud:FindFirstChild("ActionArea")
+        if actionArea then
+            for _, conn in ipairs(getconnections(actionArea.InputBegan)) do
+                if conn.Function then
+                    local shootFn = debug.getupvalue(conn.Function, 2)
+                    if type(shootFn) == "function" then
+                        GunHook.Shoot = shootFn
+                        pcall(function() GunHook.Reload = debug.getupvalue(shootFn, 2) end)
+                        pcall(function() GunHook.Bullet = debug.getupvalue(shootFn, 16) end)
+                        GunHook.Ready = (GunHook.Shoot ~= nil and GunHook.Bullet ~= nil)
+                        break
+                    end
+                end
+            end
+        end
+
+        for _, conn in ipairs(getconnections(LocalPlayer.CharacterAdded)) do
+            if conn.Function then
+                local okS, src = pcall(debug.info, conn.Function, "s")
+                if okS and type(src) == "string" and src:find("GunController") then
+                    pcall(function() GunHook.ShootParams = debug.getupvalue(conn.Function, 2) end)
+                    break
+                end
+            end
+        end
+
+        -- Hook pl.Bullet ONCE (Never re-hook on respawn to avoid recursive stack overflow!)
+        if GunHook.Bullet and hookfunction and not GunHook.IsHooked then
+            GunHook.IsHooked = true
+            GunHook.OldBullet = hookfunction(GunHook.Bullet, function(...)
+                local args = table.pack(...)
+                if State.SilentAim then
+                    if math.random(1, 100) <= State.SilentAimHitChance then
+                        local targetPart = GunHook.CurrentSilentTargetPart
+                        if not (targetPart and targetPart.Parent) then
+                            targetPart = GetBestScreenTarget(
+                                State.SilentAimFOV,
+                                State.SilentAimAimPart,
+                                State.SilentAimWallcheck,
+                                State.SilentAimHostileCheck
+                            )
+                        end
+                        if targetPart and targetPart.Parent then
+                            args[2] = targetPart.Position
+                            if type(args[3]) == "number" then
+                                args[3] = 0
+                            end
+                        end
+                    end
+                elseif State.GunMods and State.GunNoSpread then
+                    if type(args[3]) == "number" then
+                        args[3] = 0
+                    end
+                end
+                return GunHook.OldBullet(table.unpack(args, 1, args.n))
+            end)
+        end
+    end)
+
+    return GunHook.Ready
+end
+
+task.spawn(function()
+    for _ = 1, 15 do
+        if SetupGunControllerHooks() and GunHook.IsHooked then break end
+        task.wait(1)
+    end
+end)
+
+-- ============================================================================
+-- // SECTION 3: OVERLAY GUI (FOV RINGS, ARREST COOLDOWN, MOBILE QUICK BAR)
+-- ============================================================================
 local OverlayGui = TrackInstance(Instance.new("ScreenGui"))
 OverlayGui.Name = "PL2026_Overlay"
 OverlayGui.IgnoreGuiInset = true
@@ -422,8 +455,7 @@ SilentFOVFrame.Position = UDim2.fromScale(0.5, 0.5)
 SilentFOVFrame.Size = UDim2.fromOffset(360, 360)
 SilentFOVFrame.Visible = false
 SilentFOVFrame.Parent = OverlayGui
-local SilentFOVCorner = Instance.new("UICorner", SilentFOVFrame)
-SilentFOVCorner.CornerRadius = UDim.new(1, 0)
+Instance.new("UICorner", SilentFOVFrame).CornerRadius = UDim.new(1, 0)
 local SilentFOVStroke = Instance.new("UIStroke", SilentFOVFrame)
 SilentFOVStroke.Color = Color3.fromRGB(255, 75, 75)
 SilentFOVStroke.Thickness = 1.5
@@ -437,14 +469,12 @@ AimAssistFOVFrame.Position = UDim2.fromScale(0.5, 0.5)
 AimAssistFOVFrame.Size = UDim2.fromOffset(280, 280)
 AimAssistFOVFrame.Visible = false
 AimAssistFOVFrame.Parent = OverlayGui
-local AimAssistFOVCorner = Instance.new("UICorner", AimAssistFOVFrame)
-AimAssistFOVCorner.CornerRadius = UDim.new(1, 0)
+Instance.new("UICorner", AimAssistFOVFrame).CornerRadius = UDim.new(1, 0)
 local AimAssistFOVStroke = Instance.new("UIStroke", AimAssistFOVFrame)
 AimAssistFOVStroke.Color = Color3.fromRGB(80, 180, 255)
 AimAssistFOVStroke.Thickness = 1.4
 AimAssistFOVStroke.Transparency = 0.35
 
--- Arrest Cooldown Bar UI
 local ArrestBarHolder = Instance.new("Frame")
 ArrestBarHolder.Name = "ArrestCooldownBar"
 ArrestBarHolder.AnchorPoint = Vector2.new(0.5, 0.5)
@@ -476,9 +506,8 @@ ArrestBarText.Text = ""
 ArrestBarText.Parent = ArrestBarHolder
 
 -- ============================================================================
--- // SECTION 3: 2026 INSTANT WEAPON GRABBER (#TouchGiver + GiverPressed)
+-- // SECTION 4: 2026 INSTANT WEAPON GRABBER (#TouchGiver + GiverPressed)
 -- ============================================================================
--- Exact 2026 TouchGiver coordinates from workspace:QueryDescendants("#TouchGiver")
 local KnownGunLocations = {
     ["Remington 870"] = {
         SearchPivot = Vector3.new(820.2986, 97.85, 2229.3962),
@@ -507,7 +536,6 @@ local KnownGunLocations = {
 }
 
 local function FindTouchGiverForWeapon(weaponName)
-    -- Method 1: Check ToolName attribute on any TouchGiver model
     local givers = {}
     local ok, queried = pcall(function()
         return Workspace:QueryDescendants("#TouchGiver")
@@ -530,7 +558,6 @@ local function FindTouchGiverForWeapon(weaponName)
         end
     end
 
-    -- Method 2: Closest TouchGiver to known 2026 coordinates
     local info = KnownGunLocations[weaponName]
     if info then
         local closest, bestDist = nil, 25
@@ -561,24 +588,48 @@ local function HasWeapon(weaponName)
     return false
 end
 
+local OriginalGunAttributes = setmetatable({}, { __mode = "k" })
+
 local function ApplyGunModsToTool(tool)
     if not tool or not tool:IsA("Tool") then return end
     if tool:GetAttribute("ToolType") ~= "Gun" and not tool:GetAttribute("FireRate") then return end
-    if not State.GunMods then return end
 
+    if not OriginalGunAttributes[tool] then
+        OriginalGunAttributes[tool] = {
+            FireRate = tool:GetAttribute("FireRate"),
+            SpreadRadius = tool:GetAttribute("SpreadRadius"),
+            AutoFire = tool:GetAttribute("AutoFire"),
+            Range = tool:GetAttribute("Range"),
+            AccurateRange = tool:GetAttribute("AccurateRange"),
+        }
+    end
+
+    local orig = OriginalGunAttributes[tool]
     pcall(function()
-        if State.GunFireRateSPS and State.GunFireRateSPS > 0 then
-            tool:SetAttribute("FireRate", 1 / State.GunFireRateSPS)
-        end
-        if State.GunNoSpread then
-            tool:SetAttribute("SpreadRadius", 0)
-        end
-        if State.GunFullAuto then
-            tool:SetAttribute("AutoFire", true)
-        end
-        if State.GunInfiniteRange then
-            tool:SetAttribute("Range", 9999)
-            tool:SetAttribute("AccurateRange", 9999)
+        if State.GunMods then
+            if State.GunFireRateSPS and State.GunFireRateSPS > 0 then
+                tool:SetAttribute("FireRate", 1 / State.GunFireRateSPS)
+            end
+            if State.GunNoSpread then
+                tool:SetAttribute("SpreadRadius", 0)
+            elseif orig and orig.SpreadRadius then
+                tool:SetAttribute("SpreadRadius", orig.SpreadRadius)
+            end
+            if State.GunFullAuto then
+                tool:SetAttribute("AutoFire", true)
+            elseif orig and orig.AutoFire ~= nil then
+                tool:SetAttribute("AutoFire", orig.AutoFire)
+            end
+            if State.GunInfiniteRange then
+                tool:SetAttribute("Range", 9999)
+                tool:SetAttribute("AccurateRange", 9999)
+            end
+        elseif orig then
+            if orig.FireRate then tool:SetAttribute("FireRate", orig.FireRate) end
+            if orig.SpreadRadius then tool:SetAttribute("SpreadRadius", orig.SpreadRadius) end
+            if orig.AutoFire ~= nil then tool:SetAttribute("AutoFire", orig.AutoFire) end
+            if orig.Range then tool:SetAttribute("Range", orig.Range) end
+            if orig.AccurateRange then tool:SetAttribute("AccurateRange", orig.AccurateRange) end
         end
     end)
 end
@@ -622,6 +673,7 @@ local function GrabWeapons(weaponList)
 
     if #queue == 0 then
         ApplyGunModsAll()
+        Notify("Weapons", "You already have the selected weapons!", 2.5)
         return
     end
 
@@ -629,7 +681,6 @@ local function GrabWeapons(weaponList)
     local savedCF = hrp.CFrame
     local stepName = "PL2026_GunGrabRestore"
 
-    -- Seamless RenderStepped visual restore so camera/screen doesn't flicker
     pcall(function()
         RunService:BindToRenderStep(stepName, Enum.RenderPriority.Character.Value + 1, function()
             if hrp and hrp.Parent then
@@ -657,12 +708,13 @@ local function GrabWeapons(weaponList)
     end
 
     IsGrabbingGuns = false
+    SetupGunControllerHooks()
     ApplyGunModsAll()
     Notify("Weapons Grabbed", "Equipped selected 2026 weapons!", 3)
 end
 
 -- ============================================================================
--- // SECTION 4: TEAM SWITCHER & FAST RESPAWN (<1s Neutral Trick)
+-- // SECTION 5: TEAM SWITCHER & FAST RESPAWN (<1s Neutral Trick)
 -- ============================================================================
 local LastDeathCFrame = nil
 
@@ -721,9 +773,8 @@ local function PerformFastRespawn()
 end
 
 -- ============================================================================
--- // SECTION 5: ANTI-TASE, AUTO-CRIMINAL ON ARREST, & ANTI-CHEAT BYPASSES
+-- // SECTION 6: ANTI-TASE, AUTO-CRIMINAL, & 2026 ANTI-CHEAT BYPASSES
 -- ============================================================================
--- Destroy Client CharacterCollision Script (2026 Anti-Noclip)
 local function BypassClientAntiNoclip()
     pcall(function()
         local scriptsFolder = ReplicatedStorage:FindFirstChild("Scripts")
@@ -743,24 +794,33 @@ local function BypassClientAntiNoclip()
     end)
 end
 
--- Bypass AntiJump / Stamina Jump Drain
-local function BypassAntiJump(char)
+local DisabledJumpConns = {}
+local function BypassAntiJump(char, enableBypass)
     if not char then return end
     pcall(function()
         local hum = GetHumanoid(char)
-        if hum and getconnections then
-            for _, conn in ipairs(getconnections(hum:GetPropertyChangedSignal("Jump"))) do
-                conn:Disable()
+        if enableBypass then
+            if hum and getconnections then
+                for _, conn in ipairs(getconnections(hum:GetPropertyChangedSignal("Jump"))) do
+                    if conn and conn.Disable then
+                        conn:Disable()
+                        table.insert(DisabledJumpConns, conn)
+                    end
+                end
             end
-        end
-        local aj = char:FindFirstChild("AntiJump")
-        if aj then
-            aj.Disabled = true
+            local aj = char:FindFirstChild("AntiJump")
+            if aj then aj.Disabled = true end
+        else
+            for _, conn in ipairs(DisabledJumpConns) do
+                pcall(function() conn:Enable() end)
+            end
+            table.clear(DisabledJumpConns)
+            local aj = char:FindFirstChild("AntiJump")
+            if aj then aj.Disabled = false end
         end
     end)
 end
 
--- Anti-Tase Listener
 if Remotes.PlayerTased then
     AddConnection(Remotes.PlayerTased.OnClientEvent:Connect(function()
         if not State.AntiTase then return end
@@ -787,7 +847,6 @@ if Remotes.PlayerTased then
     end))
 end
 
--- Auto Criminal on Arrest Listener
 if Remotes.ClientArrested then
     AddConnection(Remotes.ClientArrested.OnClientEvent:Connect(function()
         if not State.AutoCriminalOnArrest then return end
@@ -805,10 +864,13 @@ if Remotes.ClientArrested then
 end
 
 -- ============================================================================
--- // SECTION 6: SERVERSIDE FE INVISIBLE & ANTI-INVISIBLE
+-- // SECTION 7: FIXED SERVERSIDE FE INVISIBLE (NO FLOOR TILT / CLEAN RESTORE)
 -- ============================================================================
 local FEInvisTrack = nil
 local FEInvisHighlight = nil
+local FEInvisSavedTransparencies = {}
+local FEInvisToggleRef = nil
+local IsSyncingFEInvis = false
 
 local function StopFEInvisible()
     if FEInvisTrack then
@@ -816,9 +878,44 @@ local function StopFEInvisible()
         pcall(function() FEInvisTrack:Destroy() end)
         FEInvisTrack = nil
     end
+
+    -- Also purge any lingering 215384594 / 18665825805 tracks on the Animator
+    local char = LocalPlayer.Character
+    local hum = GetHumanoid(char)
+    if hum then
+        pcall(function()
+            hum:SetStateEnabled(Enum.HumanoidStateType.FallingDown, true)
+            hum:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, true)
+        end)
+        local animator = hum:FindFirstChildOfClass("Animator")
+        if animator then
+            for _, track in ipairs(animator:GetPlayingAnimationTracks()) do
+                local id = track.Animation and track.Animation.AnimationId or ""
+                if id:find("215384594") or id:find("18665825805") then
+                    pcall(function() track:Stop(0) end)
+                    pcall(function() track:Destroy() end)
+                end
+            end
+        end
+    end
+
+    -- Restore saved part transparencies
+    for part, origTrans in pairs(FEInvisSavedTransparencies) do
+        if part and part.Parent then
+            pcall(function() part.Transparency = origTrans end)
+        end
+    end
+    table.clear(FEInvisSavedTransparencies)
+
+    -- Remove any ghost highlights
     if FEInvisHighlight then
         pcall(function() FEInvisHighlight:Destroy() end)
         FEInvisHighlight = nil
+    end
+    for _, child in ipairs(OverlayGui:GetChildren()) do
+        if child.Name == "PL2026_GhostOutline" then
+            pcall(function() child:Destroy() end)
+        end
     end
 end
 
@@ -826,40 +923,81 @@ local function StartFEInvisible()
     StopFEInvisible()
     local char = LocalPlayer.Character
     local hum = GetHumanoid(char)
-    if not char or not hum or hum.Health <= 0 then return end
+    local hrp = GetRoot(char)
+    if not char or not hum or not hrp or hum.Health <= 0 then return end
+
+    pcall(function()
+        hum:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
+        hum:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, false)
+    end)
+
+    -- Ghost visual on client (semi-transparent body + clean cyan outline)
+    for _, desc in ipairs(char:GetDescendants()) do
+        if (desc:IsA("BasePart") or desc:IsA("Decal") or desc:IsA("Texture")) and desc ~= hrp then
+            if desc.Transparency < 0.65 then
+                FEInvisSavedTransparencies[desc] = desc.Transparency
+                desc.Transparency = 0.65
+            end
+        end
+    end
 
     local animator = hum:FindFirstChildOfClass("Animator") or Instance.new("Animator", hum)
+    local isR15 = (hum.RigType == Enum.HumanoidRigType.R15)
     local anim = Instance.new("Animation")
-    if hum.RigType == Enum.HumanoidRigType.R6 then
-        anim.AnimationId = "rbxassetid://215384594"
-    else
-        anim.AnimationId = "rbxassetid://18665825805"
-    end
+    anim.AnimationId = isR15 and "rbxassetid://18665825805" or "rbxassetid://215384594"
 
     local ok, track = pcall(function()
         return animator:LoadAnimation(anim)
     end)
+    anim:Destroy()
+
     if ok and track then
         FEInvisTrack = track
         track.Priority = Enum.AnimationPriority.Action4
-        track:Play(0, 1, 0)
-        track.TimePosition = (hum.RigType == Enum.HumanoidRigType.R6) and 0.4 or 1.95
-        track:AdjustSpeed(0)
+        -- Play with weight 0.001 (Parallax technique) so your character doesn't tilt into the floor on your screen!
+        track:Play(0, 0.001, 0)
+        task.delay(0.03, function()
+            if FEInvisTrack == track and State.FEInvisible then
+                pcall(function()
+                    track.TimePosition = isR15 and 1.95 or 0.4
+                    track:AdjustSpeed(0)
+                end)
+            end
+        end)
 
         local hl = Instance.new("Highlight")
         hl.Name = "PL2026_GhostOutline"
+        hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
         hl.FillColor = Color3.fromRGB(0, 210, 255)
         hl.OutlineColor = Color3.fromRGB(0, 255, 255)
-        hl.FillTransparency = 0.75
-        hl.OutlineTransparency = 0.1
+        hl.FillTransparency = 1
+        hl.OutlineTransparency = 0.15
         hl.Adornee = char
         hl.Parent = OverlayGui
         FEInvisHighlight = hl
     end
 end
 
+local function SetFEInvisibleState(newState, notifyUser)
+    if IsSyncingFEInvis then return end
+    IsSyncingFEInvis = true
+    State.FEInvisible = newState
+    if newState then
+        StartFEInvisible()
+    else
+        StopFEInvisible()
+    end
+    if FEInvisToggleRef and FEInvisToggleRef.Set then
+        pcall(function() FEInvisToggleRef:Set(newState) end)
+    end
+    if notifyUser then
+        Notify("FE Invisible", newState and "Serverside Invisibility ON" or "Serverside Invisibility OFF", 2)
+    end
+    IsSyncingFEInvis = false
+end
+
 -- ============================================================================
--- // SECTION 7: VEHICLE SPAWNER, MOBILE/PC VEHICLE FLY, & VEHICLE SPEED
+-- // SECTION 8: VEHICLE SPAWNER, MOBILE/PC VEHICLE FLY, & QUICK BAR
 -- ============================================================================
 local function SpawnAndEnterNearestCar()
     if not Remotes.InteractWithItem then
@@ -932,7 +1070,6 @@ local function SpawnAndEnterNearestCar()
     end)
 end
 
--- Mobile On-Screen Controls for Vehicle Fly + Quick Action Buttons
 local MobileFlyInput = { Up = 0, Down = 0 }
 
 local MobileQuickBar = Instance.new("Frame")
@@ -970,7 +1107,6 @@ local function CreateQuickMobileButton(text, color, callback)
     return btn
 end
 
--- Perform Fast Gun Switch (Unequip -> Equip resets Prison Life fire delay)
 local function TriggerFastSwitch()
     local char = LocalPlayer.Character
     local hum = GetHumanoid(char)
@@ -979,7 +1115,8 @@ local function TriggerFastSwitch()
     if tool and (tool:GetAttribute("ToolType") == "Gun" or tool:GetAttribute("FireRate")) then
         hum:UnequipTools()
         task.wait()
-        if char and hum and tool.Parent == LocalPlayer:FindFirstChildOfClass("Backpack") then
+        local bp = LocalPlayer:FindFirstChildOfClass("Backpack")
+        if char and hum and bp and tool.Parent == bp then
             hum:EquipTool(tool)
         end
     end
@@ -992,17 +1129,9 @@ CreateQuickMobileButton("🔫 Grab Guns", Color3.fromRGB(40, 150, 90), function(
     end)
 end)
 CreateQuickMobileButton("👻 FE Invis", Color3.fromRGB(130, 65, 210), function()
-    State.FEInvisible = not State.FEInvisible
-    if State.FEInvisible then
-        StartFEInvisible()
-        Notify("FE Invisible", "Serverside Invisibility ON", 2)
-    else
-        StopFEInvisible()
-        Notify("FE Invisible", "Serverside Invisibility OFF", 2)
-    end
+    SetFEInvisibleState(not State.FEInvisible, true)
 end)
 
--- Vehicle Fly Up / Down Mobile Buttons
 local FlyUpBtn = CreateQuickMobileButton("▲ Fly Up", Color3.fromRGB(35, 140, 175), function() end)
 local FlyDownBtn = CreateQuickMobileButton("▼ Fly Down", Color3.fromRGB(35, 140, 175), function() end)
 FlyUpBtn.Visible = false
@@ -1030,7 +1159,7 @@ FlyDownBtn.InputEnded:Connect(function(inp)
 end)
 
 -- ============================================================================
--- // SECTION 8: ROLE-COLORED ESP & C4 ESP
+-- // SECTION 9: ROLE-COLORED ESP (COMPACT & DISTANCE-FILTERED) & C4 ESP
 -- ============================================================================
 local ESPObjects = {}
 local C4Highlights = {}
@@ -1045,6 +1174,8 @@ local function RemovePlayerESP(plr)
 end
 
 local function UpdatePlayerESP()
+    local myHrp = GetRoot(LocalPlayer.Character)
+
     for _, plr in ipairs(Players:GetPlayers()) do
         if plr ~= LocalPlayer then
             local char = plr.Character
@@ -1052,21 +1183,26 @@ local function UpdatePlayerESP()
             local hum = GetHumanoid(char)
 
             if State.ESP and char and hrp and hum and hum.Health > 0 then
+                -- Always ensure HumanoidRootPart.Transparency == 1 so Highlight NEVER draws giant hitbox cubes!
+                if hrp.Transparency < 1 then
+                    hrp.Transparency = 1
+                end
+
                 local data = ESPObjects[plr]
                 if not data then
                     data = {}
                     local hl = Instance.new("Highlight")
                     hl.Name = "PL2026_HL"
                     hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-                    hl.FillTransparency = 0.65
-                    hl.OutlineTransparency = 0.1
+                    hl.FillTransparency = 0.68
+                    hl.OutlineTransparency = 0.12
                     hl.Parent = OverlayGui
                     data.Highlight = hl
 
                     local bb = Instance.new("BillboardGui")
                     bb.Name = "PL2026_BB"
-                    bb.Size = UDim2.fromOffset(200, 54)
-                    bb.StudsOffset = Vector3.new(0, 3.4, 0)
+                    bb.Size = UDim2.fromOffset(170, 42)
+                    bb.StudsOffset = Vector3.new(0, 3.2, 0)
                     bb.AlwaysOnTop = true
                     bb.Parent = OverlayGui
                     data.Billboard = bb
@@ -1075,9 +1211,8 @@ local function UpdatePlayerESP()
                     lbl.Size = UDim2.fromScale(1, 1)
                     lbl.BackgroundTransparency = 1
                     lbl.Font = Enum.Font.GothamBold
-                    lbl.TextSize = 12
+                    lbl.TextSize = 11
                     lbl.TextStrokeTransparency = 0.15
-                    lbl.RichText = true
                     lbl.Parent = bb
                     data.Label = lbl
 
@@ -1093,7 +1228,6 @@ local function UpdatePlayerESP()
                 data.Billboard.Enabled = State.ESPNameTag or State.ESPHealth or State.ESPDistance or State.ESPWeapon
                 data.Billboard.Adornee = char:FindFirstChild("Head") or hrp
 
-                local myHrp = GetRoot(LocalPlayer.Character)
                 local dist = myHrp and math.round((hrp.Position - myHrp.Position).Magnitude) or 0
                 local tool = char:FindFirstChildOfClass("Tool")
 
@@ -1108,19 +1242,21 @@ local function UpdatePlayerESP()
                     table.insert(lines, string.format("%s%s", plr.DisplayName or plr.Name, flags))
                 end
 
-                local infoParts = {}
-                if State.ESPHealth then
-                    table.insert(infoParts, string.format("HP: %d", math.round(hum.Health)))
-                end
-                if State.ESPDistance then
-                    table.insert(infoParts, string.format("%dm", dist))
-                end
-                if #infoParts > 0 then
-                    table.insert(lines, table.concat(infoParts, " | "))
-                end
-
-                if State.ESPWeapon and tool then
-                    table.insert(lines, string.format("[%s]", tool.Name))
+                -- Keep crowded long-range views clean by showing detailed stats within 240m or when holding a gun
+                if dist <= 240 or tool then
+                    local infoParts = {}
+                    if State.ESPHealth then
+                        table.insert(infoParts, string.format("%dHP", math.round(hum.Health)))
+                    end
+                    if State.ESPDistance then
+                        table.insert(infoParts, string.format("%dm", dist))
+                    end
+                    if State.ESPWeapon and tool then
+                        table.insert(infoParts, string.format("[%s]", tool.Name))
+                    end
+                    if #infoParts > 0 then
+                        table.insert(lines, table.concat(infoParts, " • "))
+                    end
                 end
 
                 data.Label.TextColor3 = teamColor
@@ -1131,7 +1267,6 @@ local function UpdatePlayerESP()
         end
     end
 
-    -- C4 ESP (Highlights placed C4 explosives)
     if State.C4ESP then
         for _, c4 in ipairs(CollectionService:GetTagged("C4")) do
             if not C4Highlights[c4] then
@@ -1163,7 +1298,6 @@ end
 
 AddConnection(Players.PlayerRemoving:Connect(RemovePlayerESP))
 
--- Live Killfeed Notifier (ReplicatedStorage.Killfeed)
 pcall(function()
     local kfFolder = ReplicatedStorage:FindFirstChild("Killfeed")
     if kfFolder then
@@ -1180,25 +1314,53 @@ pcall(function()
 end)
 
 -- ============================================================================
--- // SECTION 9: MAIN RUNTIME LOOPS (SILENT AIM, AIM ASSIST, TRIGGERBOT, ETC.)
+-- // SECTION 10: EXACT 2026 MAXSPEED SUB-REGIONS & MAIN RUNTIME LOOPS
 -- ============================================================================
+-- Exact 20 indoor sub-regions & prison yard bounds from 2026 Prison Life anti-cheat
+local IndoorSubRegions = {
+    { cx = 752.77, cz = 2571.80, hx = 109.93 / 2, hz = 13.60 / 2 },
+    { cx = 701.15, cz = 2313.70, hx = 69.10 / 2,  hz = 163.00 / 2 },
+    { cx = 917.30, cz = 2392.60, hx = 107.00 / 2, hz = 28.00 / 2 },
+    { cx = 830.30, cz = 2242.55, hx = 58.00 / 2,  hz = 34.10 / 2 },
+    { cx = 748.90, cz = 2340.60, hx = 59.40 / 2,  hz = 109.20 / 2 },
+    { cx = 799.10, cz = 2299.00, hx = 14.00 / 2,  hz = 33.99 / 2 },
+    { cx = 826.69, cz = 2338.60, hx = 51.19 / 2,  hz = 12.00 / 2 },
+    { cx = 799.65, cz = 2269.23, hx = 12.90 / 2,  hz = 21.50 / 2 },
+    { cx = 765.36, cz = 2247.57, hx = 59.32 / 2,  hz = 64.82 / 2 },
+    { cx = 850.20, cz = 2571.80, hx = 23.20 / 2,  hz = 13.60 / 2 },
+    { cx = 779.80, cz = 2479.80, hx = 164.00 / 2, hz = 170.40 / 2 },
+    { cx = 983.35, cz = 2315.15, hx = 31.10 / 2,  hz = 58.90 / 2 },
+    { cx = 916.50, cz = 2225.40, hx = 99.00 / 2,  hz = 38.00 / 2 },
+    { cx = 889.80, cz = 2361.60, hx = 220.00 / 2, hz = 34.00 / 2 },
+    { cx = 915.80, cz = 2456.60, hx = 64.00 / 2,  hz = 100.00 / 2 },
+    { cx = 820.80, cz = 2386.60, hx = 82.00 / 2,  hz = 16.00 / 2 },
+    { cx = 916.90, cz = 2294.50, hx = 98.20 / 2,  hz = 100.20 / 2 },
+    { cx = 836.95, cz = 2296.10, hx = 61.70 / 2,  hz = 73.00 / 2 },
+    { cx = 872.30, cz = 2463.60, hx = 19.00 / 2,  hz = 62.00 / 2 },
+    { cx = 959.30, cz = 2463.60, hx = 19.00 / 2,  hz = 62.00 / 2 },
+}
+local PrisonOuterBox = { cx = 773.62, cz = 2327.43, hx = 563.37 / 2, hz = 540.30 / 2 }
+
+local function IsInsideBox(x, z, box)
+    return math.abs(x - box.cx) <= box.hx and math.abs(z - box.cz) <= box.hz
+end
+
+local function GetSafeRegionMaxSpeed(pos)
+    local x, z = pos.X, pos.Z
+    for _, r in ipairs(IndoorSubRegions) do
+        if IsInsideBox(x, z, r) then
+            return 32
+        end
+    end
+    if IsInsideBox(x, z, PrisonOuterBox) then
+        return 50
+    end
+    return 100
+end
+
 local LastTriggerShot = 0
 local LastArrestTime = 0
 local LastKillAuraTime = 0
-
--- Region check for 2026 Prison Life MaxSpeed Anti-Cheat
-local function GetSafeRegionMaxSpeed(pos)
-    -- Tight indoor prison check
-    if pos.X > 650 and pos.X < 1080 and pos.Z > 2180 and pos.Z < 2450 then
-        return 34
-    end
-    -- General prison yard & perimeter
-    if pos.X > 500 and pos.X < 1200 and pos.Z > 1950 and pos.Z < 2650 then
-        return 48
-    end
-    -- Outside prison (city / criminal base)
-    return 85
-end
 
 AddConnection(RunService.RenderStepped:Connect(function(dt)
     local screenCenter = Vector2.new(Camera.ViewportSize.X * 0.5, Camera.ViewportSize.Y * 0.5)
@@ -1222,13 +1384,12 @@ AddConnection(RunService.RenderStepped:Connect(function(dt)
 
     -- Update Silent Aim Target
     if State.SilentAim then
-        local targetPart = GetBestScreenTarget(
+        GunHook.CurrentSilentTargetPart = GetBestScreenTarget(
             State.SilentAimFOV,
             State.SilentAimAimPart,
             State.SilentAimWallcheck,
             State.SilentAimHostileCheck
         )
-        GunHook.CurrentSilentTargetPart = targetPart
     else
         GunHook.CurrentSilentTargetPart = nil
     end
@@ -1258,31 +1419,38 @@ AddConnection(RunService.RenderStepped:Connect(function(dt)
         end
     end
 
-    -- Triggerbot / Auto-Shoot
-    if State.Triggerbot and GunHook.Ready and GunHook.Shoot then
-        local char = LocalPlayer.Character
-        local tool = char and char:FindFirstChildOfClass("Tool")
-        if tool and (tool:GetAttribute("ToolType") == "Gun" or tool:GetAttribute("FireRate")) then
-            local ammo = tool:GetAttribute("Local_CurrentAmmo") or tool:GetAttribute("CurrentAmmo") or 1
-            if ammo <= 0 then
-                if State.TriggerbotAutoReload and GunHook.Reload and (tool:GetAttribute("Local_ReloadSession") or 0) == 0 then
-                    task.spawn(GunHook.Reload)
-                end
-            elseif (os.clock() - LastTriggerShot) >= State.TriggerbotDelay then
-                local targetPart = GunHook.CurrentSilentTargetPart or GetBestScreenTarget(
-                    State.SilentAimFOV,
-                    State.SilentAimAimPart,
-                    State.TriggerbotWallcheck,
-                    State.SilentAimHostileCheck
-                )
-                if targetPart then
-                    LastTriggerShot = os.clock()
-                    GunHook.CurrentSilentTargetPart = targetPart
-                    task.spawn(GunHook.Shoot, {
-                        UserInputState = Enum.UserInputState.Begin,
-                        UserInputType = Enum.UserInputType.MouseButton1,
-                        Position = Vector3.zero,
-                    })
+    -- Fixed Triggerbot / Auto-Shoot (Properly transitions UserInputState to End after firing!)
+    if State.Triggerbot then
+        if not GunHook.Ready then
+            SetupGunControllerHooks()
+        end
+        if GunHook.Ready and GunHook.Shoot then
+            local char = LocalPlayer.Character
+            local tool = char and char:FindFirstChildOfClass("Tool")
+            if tool and (tool:GetAttribute("ToolType") == "Gun" or tool:GetAttribute("FireRate")) then
+                local ammo = tool:GetAttribute("Local_CurrentAmmo") or tool:GetAttribute("CurrentAmmo") or 1
+                if ammo <= 0 then
+                    if State.TriggerbotAutoReload and GunHook.Reload and (tool:GetAttribute("Local_ReloadSession") or 0) <= 0 then
+                        task.spawn(GunHook.Reload)
+                    end
+                elseif not tool:GetAttribute("Local_IsShooting") and (os.clock() - LastTriggerShot) >= State.TriggerbotDelay then
+                    local targetPart = GunHook.CurrentSilentTargetPart or GetBestScreenTarget(
+                        State.SilentAimFOV,
+                        State.SilentAimAimPart,
+                        State.TriggerbotWallcheck,
+                        State.SilentAimHostileCheck
+                    )
+                    if targetPart then
+                        LastTriggerShot = os.clock()
+                        GunHook.CurrentSilentTargetPart = targetPart
+                        local inputObj = {
+                            UserInputState = Enum.UserInputState.Begin,
+                            UserInputType = Enum.UserInputType.MouseButton1,
+                            Position = Vector3.zero,
+                        }
+                        task.spawn(GunHook.Shoot, inputObj)
+                        inputObj.UserInputState = Enum.UserInputState.End
+                    end
                 end
             end
         end
@@ -1299,7 +1467,7 @@ AddConnection(RunService.RenderStepped:Connect(function(dt)
     end
 end))
 
--- Heartbeat Loop (Movement, KillAura, AutoArrest, VehicleFly, AntiFling, Hitboxes)
+-- Heartbeat Loop (Native WalkSpeed MaxSpeed, KillAura, AutoArrest, VehicleFly, AntiFling)
 AddConnection(RunService.Heartbeat:Connect(function(dt)
     local char = LocalPlayer.Character
     local hrp = GetRoot(char)
@@ -1308,7 +1476,6 @@ AddConnection(RunService.Heartbeat:Connect(function(dt)
     if char and hrp and hum and hum.Health > 0 then
         LastDeathCFrame = hrp.CFrame
 
-        -- Always Enable Backpack
         if State.AlwaysBackpack then
             LocalPlayer:SetAttribute("BackpackEnabled", true)
         end
@@ -1322,22 +1489,21 @@ AddConnection(RunService.Heartbeat:Connect(function(dt)
             end
         end
 
-        -- Movement: MaxSpeed / AlwaysSprint
+        -- Fixed Movement: Native Humanoid.WalkSpeed with Region Anti-Cheat Protection
         if not hum.Sit then
             if State.MaxSpeed then
-                local targetSpeed = (State.MaxSpeedMode == "RegionSafe")
-                    and GetSafeRegionMaxSpeed(hrp.Position)
-                    or State.CustomWalkSpeed
-                local moveDir = hum.MoveDirection
-                if moveDir.Magnitude > 0 then
-                    hrp.AssemblyLinearVelocity = Vector3.new(
-                        moveDir.X * targetSpeed,
-                        hrp.AssemblyLinearVelocity.Y,
-                        moveDir.Z * targetSpeed
-                    )
+                local regionCeiling = GetSafeRegionMaxSpeed(hrp.Position)
+                if State.MaxSpeedMode == "RegionSafe" then
+                    hum.WalkSpeed = regionCeiling
+                else
+                    -- In Custom mode, cap indoor sub-region speed to 34 so the server never rubberbands you!
+                    local safeCustom = (regionCeiling == 32) and math.min(State.CustomWalkSpeed, 34) or State.CustomWalkSpeed
+                    hum.WalkSpeed = safeCustom
                 end
-            elseif State.AlwaysSprint and hum.WalkSpeed < 24 then
-                hum.WalkSpeed = 24
+            elseif State.AlwaysSprint then
+                if hum.WalkSpeed < 24 then
+                    hum.WalkSpeed = 24
+                end
             end
         end
 
@@ -1362,11 +1528,7 @@ AddConnection(RunService.Heartbeat:Connect(function(dt)
                 local vel = Vector3.zero
 
                 if moveDir.Magnitude > 0 then
-                    -- Works seamlessly with both Mobile Touch Thumbstick and PC WASD!
-                    local flatLook = Vector3.new(camCF.LookVector.X, 0, camCF.LookVector.Z)
-                    if flatLook.Magnitude > 0.01 then
-                        vel = vel + (moveDir.Unit * State.VehicleFlySpeed)
-                    end
+                    vel = vel + (moveDir.Unit * State.VehicleFlySpeed)
                 end
 
                 local vertical = (MobileFlyInput.Up - MobileFlyInput.Down)
@@ -1449,16 +1611,17 @@ AddConnection(RunService.Heartbeat:Connect(function(dt)
     -- Anti-Fling (Disable Vehicle Collisions Against Local Character)
     if State.AntiFling and Workspace:FindFirstChild("CarContainer") then
         for _, part in ipairs(Workspace.CarContainer:GetDescendants()) do
-            if part:IsA("BasePart") and part.CanCollide then
+            if part:IsA("BasePart") and part.CollisionGroup ~= "Wheels" and part.CanCollide then
                 local mySeat = hum and hum.SeatPart
                 if not mySeat or not part:IsDescendantOf(mySeat.Parent.Parent) then
                     part.CanCollide = false
+                    part.CanTouch = false
                 end
             end
         end
     end
 
-    -- Vehicle Fling Exploit (Launches network-owned VehicleSeats into enemies)
+    -- Vehicle Fling Exploit
     if State.VehicleFling and Workspace:FindFirstChild("CarContainer") then
         for _, desc in ipairs(Workspace.CarContainer:GetDescendants()) do
             if desc:IsA("VehicleSeat") then
@@ -1493,7 +1656,36 @@ AddConnection(RunService.Heartbeat:Connect(function(dt)
     end
 end))
 
--- Secondary 0.15s Utility Loop (ESP, Hitboxes, RiotShield, AutoHeal, AutoPickup, AutoArmor, AntiInvisible)
+-- Saved Door & Hitbox Data for Clean Restoration
+local OriginalDoorData = setmetatable({}, { __mode = "k" })
+local OriginalHitboxData = setmetatable({}, { __mode = "k" })
+
+local function RestoreAllHitboxes()
+    for hrp, orig in pairs(OriginalHitboxData) do
+        if hrp and hrp.Parent then
+            pcall(function()
+                hrp.Size = orig.Size
+                hrp.CanCollide = orig.CanCollide
+                hrp.Transparency = 1
+            end)
+        end
+    end
+    table.clear(OriginalHitboxData)
+end
+
+local function RestoreAllDoors()
+    for part, orig in pairs(OriginalDoorData) do
+        if part and part.Parent then
+            pcall(function()
+                part.CanCollide = orig.CanCollide
+                part.Transparency = orig.Transparency
+            end)
+        end
+    end
+    table.clear(OriginalDoorData)
+end
+
+-- Secondary 0.15s Utility Loop (ESP, Invisible Hitbox Expander, RiotShield, AutoHeal, AutoPickup, AutoArmor)
 task.spawn(function()
     while task.wait(0.15) do
         if not getgenv().PrisonLife2026Running then break end
@@ -1504,24 +1696,32 @@ task.spawn(function()
         local myHrp = GetRoot(myChar)
         local myHum = GetHumanoid(myChar)
 
-        -- Hitbox Expander & Anti-RiotShield & Anti-Invisible
         for _, plr in ipairs(Players:GetPlayers()) do
             if plr ~= LocalPlayer and plr.Character then
                 local tChar = plr.Character
                 local tHrp = GetRoot(tChar)
                 local tHum = GetHumanoid(tChar)
 
-                -- Expand Hitbox
+                -- Fixed Hitbox Expander (Transparency locked at 1 so Highlight NEVER draws giant 3D cubes!)
                 if tHrp then
-                    if State.ExpandHitbox and IsValidCombatTarget(plr, false) then
-                        tHrp.Size = Vector3.new(State.HitboxSize, State.HitboxSize, State.HitboxSize)
-                        tHrp.Transparency = State.HitboxTransparency
-                        tHrp.CanCollide = false
-                    else
-                        if tHrp.Size.X > 3 then
-                            tHrp.Size = Vector3.new(2, 2, 1)
-                            tHrp.Transparency = 1
+                    if State.ExpandHitbox and IsValidCombatTarget(plr, State.SilentAimHostileCheck) then
+                        if not OriginalHitboxData[tHrp] then
+                            OriginalHitboxData[tHrp] = {
+                                Size = tHrp.Size,
+                                CanCollide = tHrp.CanCollide,
+                            }
                         end
+                        tHrp.Size = Vector3.new(State.HitboxSize, State.HitboxSize, State.HitboxSize)
+                        tHrp.Transparency = 1
+                        tHrp.CanCollide = false
+                    elseif OriginalHitboxData[tHrp] then
+                        local orig = OriginalHitboxData[tHrp]
+                        tHrp.Size = orig.Size
+                        tHrp.CanCollide = orig.CanCollide
+                        tHrp.Transparency = 1
+                        OriginalHitboxData[tHrp] = nil
+                    elseif tHrp.Transparency < 1 then
+                        tHrp.Transparency = 1
                     end
                 end
 
@@ -1531,7 +1731,7 @@ task.spawn(function()
                     shield.CanQuery = not State.AntiRiotShield
                 end
 
-                -- Anti-Invisible (Strip exploiters' underground animation weights)
+                -- Anti-Invisible
                 if State.AntiInvisible and tHum then
                     local animator = tHum:FindFirstChildOfClass("Animator")
                     if animator then
@@ -1547,7 +1747,7 @@ task.spawn(function()
             end
         end
 
-        -- Auto Heal with Cafeteria Food (Breakfast, Lunch, Dinner)
+        -- Auto Heal with Cafeteria Food
         if State.AutoHeal and myChar and myHum and myHum.Health > 0 and myHum.Health <= State.AutoHealThreshold and Remotes.EatFood then
             local bp = LocalPlayer:FindFirstChildOfClass("Backpack")
             if bp then
@@ -1569,7 +1769,7 @@ task.spawn(function()
             end
         end
 
-        -- Auto Pickup Dropped Keycards & Weapons (2026 GiverPressed on Workspace Models)
+        -- Auto Pickup Dropped Keycards & Weapons
         if State.AutoPickupDropped and myHrp and Remotes.GiverPressed then
             for _, child in ipairs(Workspace:GetChildren()) do
                 if child:IsA("Model") and child:GetAttribute("ToolName") then
@@ -1584,7 +1784,7 @@ task.spawn(function()
             end
         end
 
-        -- Auto Armor (When near armor wall)
+        -- Auto Armor
         if State.AutoArmor and myHrp and myHum and myHum.MaxHealth <= 100 and Remotes.InteractWithItem then
             local clothes = Workspace:FindFirstChild("Prison_ITEMS") and Workspace.Prison_ITEMS:FindFirstChild("clothes")
             if clothes then
@@ -1628,10 +1828,16 @@ task.spawn(function()
             end
         end
 
-        -- Open All Doors (Strip Door Collisions Locally)
+        -- Open All Doors (Saves original state & restores when toggled off)
         if State.OpenAllDoors and Workspace:FindFirstChild("Doors") then
             for _, part in ipairs(Workspace.Doors:GetDescendants()) do
                 if part:IsA("BasePart") and part.CanCollide then
+                    if not OriginalDoorData[part] then
+                        OriginalDoorData[part] = {
+                            CanCollide = part.CanCollide,
+                            Transparency = part.Transparency,
+                        }
+                    end
                     part.CanCollide = false
                     part.Transparency = math.max(part.Transparency, 0.65)
                 end
@@ -1677,7 +1883,7 @@ AddConnection(UserInputService.JumpRequest:Connect(function()
     end
 end))
 
--- Character Spawned Hooks (Auto Get Guns, Fast Respawn Listener, AntiJump, GunMods)
+-- Character Spawned Hooks
 local function AttachCharacterListeners(char)
     if not char then return end
     task.spawn(function()
@@ -1690,20 +1896,23 @@ local function AttachCharacterListeners(char)
             end))
         end
 
-        if State.AntiJumpCooldown or State.InfiniteStamina then
-            BypassAntiJump(char)
+        task.wait(0.35)
+        -- Refresh Shoot/Reload upvalues without re-hooking Bullet
+        SetupGunControllerHooks()
+
+        if State.AntiJumpCooldown or State.InfiniteStamina or State.MaxSpeed then
+            BypassAntiJump(char, true)
         end
-        if State.Noclip then
+        if State.Noclip or State.MaxSpeed then
             BypassClientAntiNoclip()
         end
 
         if State.FEInvisible then
-            task.wait(0.4)
             StartFEInvisible()
         end
 
         if State.AutoGetGuns and LocalPlayer.Team ~= Teams:FindFirstChild("Neutral") then
-            task.wait(0.55)
+            task.wait(0.4)
             GrabWeapons(State.AutoGetGunsSelection)
         end
 
@@ -1717,6 +1926,14 @@ local function AttachCharacterListeners(char)
         AddConnection(char.ChildAdded:Connect(function(child)
             task.wait(0.05)
             ApplyGunModsToTool(child)
+            if State.FEInvisible and child:IsA("Tool") then
+                for _, desc in ipairs(child:GetDescendants()) do
+                    if desc:IsA("BasePart") and desc.Transparency < 0.5 then
+                        FEInvisSavedTransparencies[desc] = desc.Transparency
+                        desc.Transparency = 0.5
+                    end
+                end
+            end
         end))
     end)
 end
@@ -1727,7 +1944,7 @@ end
 AddConnection(LocalPlayer.CharacterAdded:Connect(AttachCharacterListeners))
 
 -- ============================================================================
--- // SECTION 10: PRESET TELEPORT LOCATIONS (15 VERIFIED 2026 SPOTS)
+-- // SECTION 11: PRESET TELEPORT LOCATIONS (15 VERIFIED 2026 SPOTS)
 -- ============================================================================
 local TeleportLocations = {
     ["Prison Yard"]         = CFrame.new(780, 98, 2470),
@@ -1756,7 +1973,7 @@ local function SafeTeleport(targetCF)
 end
 
 -- ============================================================================
--- // SECTION 11: WINDUI WINDOW & TABS (PC & MOBILE OPTIMIZED)
+-- // SECTION 12: WINDUI WINDOW & TABS (PC & MOBILE OPTIMIZED)
 -- ============================================================================
 getgenv().PrisonLife2026Running = true
 
@@ -1764,7 +1981,7 @@ if WindUI then
     local Window = WindUI:CreateWindow({
         Title = "Prison Life • 2026 Hub",
         Icon = "shield",
-        Author = "Latest Sniper Update (PC & Mobile)",
+        Author = "Latest Sniper Update (PC & Mobile v1.1)",
         Folder = "PrisonLife2026Hub",
         Size = UDim2.fromOffset(580, 440),
         Transparent = true,
@@ -1799,7 +2016,7 @@ if WindUI then
         Value = false,
         Callback = function(v)
             State.SilentAim = v
-            if v and not GunHook.Ready then
+            if v then
                 SetupGunControllerHooks()
             end
         end,
@@ -1823,7 +2040,13 @@ if WindUI then
         Title = "Target Body Part",
         Values = { "Head", "HumanoidRootPart", "Torso" },
         Value = "Head",
-        Callback = function(v) State.SilentAimAimPart = v end,
+        Callback = function(v)
+            local part = NormalizeDropdownValue(v)
+            if part ~= "" then
+                State.SilentAimAimPart = part
+                State.AimAssistAimPart = part
+            end
+        end,
     })
     TabCombat:Toggle({
         Title = "Wallcheck (Visible Only)",
@@ -1852,7 +2075,10 @@ if WindUI then
     TabCombat:Toggle({
         Title = "Triggerbot (Auto-Shoot Target in FOV)",
         Value = false,
-        Callback = function(v) State.Triggerbot = v end,
+        Callback = function(v)
+            State.Triggerbot = v
+            if v then SetupGunControllerHooks() end
+        end,
     })
     TabCombat:Toggle({
         Title = "Shoot Through Riot Shields (Anti-Shield)",
@@ -1864,7 +2090,16 @@ if WindUI then
         Title = "Shoot Through Vehicles (Vehicle Wallbang)",
         Desc = "Ignores workspace.CarContainer in line-of-sight & bullet raycasts",
         Value = false,
-        Callback = function(v) State.VehicleWallbang = v end,
+        Callback = function(v)
+            State.VehicleWallbang = v
+            pcall(function()
+                if GunHook.ShootParams then
+                    GunHook.ShootParams.FilterDescendantsInstances = v
+                        and { LocalPlayer.Character, Workspace:FindFirstChild("CarContainer") }
+                        or { LocalPlayer.Character }
+                end
+            end)
+        end,
     })
 
     TabCombat:Section({ Title = "Melee Kill Aura & Hitboxes" })
@@ -1880,14 +2115,20 @@ if WindUI then
         Callback = function(v) State.KillAuraRange = tonumber(v) or 12 end,
     })
     TabCombat:Toggle({
-        Title = "Expand Enemy Hitboxes",
+        Title = "Expand Enemy Hitboxes (Invisible Box)",
+        Desc = "Enlarges enemy hitboxes without drawing giant cubes over your screen",
         Value = false,
-        Callback = function(v) State.ExpandHitbox = v end,
+        Callback = function(v)
+            State.ExpandHitbox = v
+            if not v then
+                RestoreAllHitboxes()
+            end
+        end,
     })
     TabCombat:Slider({
         Title = "Hitbox Size",
-        Value = { Min = 3, Max = 18, Default = 8 },
-        Callback = function(v) State.HitboxSize = tonumber(v) or 8 end,
+        Value = { Min = 3, Max = 18, Default = 10 },
+        Callback = function(v) State.HitboxSize = tonumber(v) or 10 end,
     })
 
     -- // TAB 2: WEAPONS & GUN MODS
@@ -2049,7 +2290,12 @@ if WindUI then
     TabPrison:Toggle({
         Title = "Open / Noclip All Prison Doors",
         Value = false,
-        Callback = function(v) State.OpenAllDoors = v end,
+        Callback = function(v)
+            State.OpenAllDoors = v
+            if not v then
+                RestoreAllDoors()
+            end
+        end,
     })
     TabPrison:Toggle({
         Title = "Electric Fence Godmode",
@@ -2108,13 +2354,12 @@ if WindUI then
     })
 
     TabVehicles:Section({ Title = "Serverside FE Invisible & Anti-Troll" })
-    TabVehicles:Toggle({
+    FEInvisToggleRef = TabVehicles:Toggle({
         Title = "Serverside FE Invisible (Animation Underground Trick)",
-        Desc = "Hides your body underground serverside while keeping camera & gun normal",
+        Desc = "Hides your body underground serverside while keeping your screen normal",
         Value = false,
         Callback = function(v)
-            State.FEInvisible = v
-            if v then StartFEInvisible() else StopFEInvisible() end
+            SetFEInvisibleState(v, false)
         end,
     })
     TabVehicles:Toggle({
@@ -2129,7 +2374,6 @@ if WindUI then
         Value = true,
         Callback = function(v) State.AntiFling = v end,
     })
-    State.AntiFling = true
     TabVehicles:Toggle({
         Title = "Vehicle Fling Enemies (Car Fling Exploit)",
         Desc = "Launches network-owned VehicleSeats at enemy players at 9500 velocity",
@@ -2143,26 +2387,50 @@ if WindUI then
     -- // TAB 5: MOVEMENT
     TabMove:Section({ Title = "2026 Anti-Rubberband Speed & Noclip" })
     TabMove:Toggle({
-        Title = "MaxSpeed (Anti-Cheat Safe Velocity Boost)",
-        Desc = "Automatically adapts speed to indoor/yard/city zones so you never rubberband",
+        Title = "MaxSpeed (Anti-Cheat Safe Speed Boost)",
+        Desc = "Uses native WalkSpeed with the 20 indoor sub-regions so you never rubberband",
         Value = false,
-        Callback = function(v) State.MaxSpeed = v end,
+        Callback = function(v)
+            State.MaxSpeed = v
+            if v then
+                BypassClientAntiNoclip()
+                if LocalPlayer.Character then
+                    BypassAntiJump(LocalPlayer.Character, true)
+                end
+            else
+                local hum = GetHumanoid(LocalPlayer.Character)
+                if hum then
+                    hum.WalkSpeed = State.AlwaysSprint and 24 or 16
+                end
+            end
+        end,
     })
     TabMove:Dropdown({
         Title = "Speed Mode",
         Values = { "RegionSafe", "Custom" },
         Value = "RegionSafe",
-        Callback = function(v) State.MaxSpeedMode = v end,
+        Callback = function(v)
+            local mode = NormalizeDropdownValue(v)
+            if mode == "RegionSafe" or mode == "Custom" then
+                State.MaxSpeedMode = mode
+            end
+        end,
     })
     TabMove:Slider({
         Title = "Custom WalkSpeed",
-        Value = { Min = 16, Max = 95, Default = 42 },
+        Value = { Min = 16, Max = 100, Default = 42 },
         Callback = function(v) State.CustomWalkSpeed = tonumber(v) or 42 end,
     })
     TabMove:Toggle({
         Title = "Always Sprint (24 WalkSpeed)",
         Value = false,
-        Callback = function(v) State.AlwaysSprint = v end,
+        Callback = function(v)
+            State.AlwaysSprint = v
+            if not v and not State.MaxSpeed then
+                local hum = GetHumanoid(LocalPlayer.Character)
+                if hum then hum.WalkSpeed = 16 end
+            end
+        end,
     })
     TabMove:Toggle({
         Title = "No Jump Cooldown & Infinite Stamina",
@@ -2171,8 +2439,8 @@ if WindUI then
         Callback = function(v)
             State.AntiJumpCooldown = v
             State.InfiniteStamina = v
-            if v and LocalPlayer.Character then
-                BypassAntiJump(LocalPlayer.Character)
+            if LocalPlayer.Character then
+                BypassAntiJump(LocalPlayer.Character, v)
             end
         end,
     })
@@ -2195,7 +2463,6 @@ if WindUI then
         Value = true,
         Callback = function(v) State.AntiKillPlane = v end,
     })
-    State.AntiKillPlane = true
 
     -- // TAB 6: ESP & TELEPORTS
     TabVisuals:Section({ Title = "Role-Colored Player ESP" })
@@ -2261,7 +2528,12 @@ if WindUI then
         Title = "Select Location",
         Values = locNames,
         Value = selectedLocation,
-        Callback = function(v) selectedLocation = v end,
+        Callback = function(v)
+            local picked = NormalizeDropdownValue(v)
+            if picked ~= "" then
+                selectedLocation = picked
+            end
+        end,
     })
     TabVisuals:Button({
         Title = "Teleport to Selected Location",
@@ -2279,7 +2551,9 @@ if WindUI then
         Title = "Select Player",
         Values = {},
         Value = "",
-        Callback = function(v) selectedPlayerName = v end,
+        Callback = function(v)
+            selectedPlayerName = NormalizeDropdownValue(v)
+        end,
     })
     local function RefreshPlayerDropdown()
         local list = {}
@@ -2317,6 +2591,8 @@ end
 getgenv().PrisonLife2026Cleanup = function()
     getgenv().PrisonLife2026Running = false
     StopFEInvisible()
+    RestoreAllHitboxes()
+    RestoreAllDoors()
     for _, conn in ipairs(Connections) do
         pcall(function() conn:Disconnect() end)
     end
@@ -2328,4 +2604,4 @@ getgenv().PrisonLife2026Cleanup = function()
     end
 end
 
-Notify("Prison Life 2026 Loaded", "All latest Sniper Update remotes & PC/Mobile controls ready!", 5)
+Notify("Prison Life 2026 v1.1 Loaded", "All 5 video bugs fixed! Ready for PC & Mobile.", 5)

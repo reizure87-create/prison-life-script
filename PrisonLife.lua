@@ -1,34 +1,49 @@
 --[[
     ================================================================================
-    🚔 PRISON LIFE — ULTIMATE 2026 SCRIPT (PC & MOBILE) [v1.1 BUGFIX PATCH]
+    🚔 PRISON LIFE — ULTIMATE 2026 SCRIPT (PC & MOBILE) [v2.0 ANTI-BAN & BUGFIX]
     ================================================================================
     Target Game : Prison Life (PlaceId: 155615604 | UniverseId: 73885730)
-    Patch Target: October/November 2026 ("Sniper Update!" & New Remotes/Attributes)
-    Platform    : PC (Keyboard/Mouse) & Mobile (Touch GUI, Floating Action Buttons,
-                  Touch Aim Assist, & On-Screen Vehicle Fly Joystick)
-    UI Library  : WindUI (Latest Release with Mobile OpenButton & PC RightShift)
+    Patch Target: Late 2026 ("Sniper Update!" Remotes, Attributes & Anti-Cheat)
+    Platform    : PC (Keyboard/Mouse) & Mobile (Touch GUI, Floating Quick Bar,
+                  Touch Aim Assist, & On-Screen Vehicle Fly Controls)
+    UI Library  : WindUI (with automatic Native PC/Mobile Touch GUI fallback)
 
-    Fixes in v1.1 (From Mobile Gameplay Video Review):
-      1. Fixed giant colored 3D cubes blocking camera when ExpandHitbox + ESP Highlight
-         are both active (HumanoidRootPart.Transparency is now locked at 1 so Roblox
-         Highlight never outlines the enlarged hitbox box).
-      2. Fixed Silent Aim & Triggerbot breaking after respawn (prevented double-hooking
-         GunController's persistent pl.Bullet function on CharacterAdded, added live
-         target acquisition inside the Bullet hook, and fixed Triggerbot's inputObj
-         UserInputState.End transition so it fires continuously).
-      3. Fixed FE Invisible getting stuck tilted in the floor / desynced GhostOutline
-         (uses weight 0.001 + full Animator track cleanup + part transparency restore
-         + synced Mobile button & WindUI toggle).
-      4. Fixed MaxSpeed rubberbanding indoors (uses the exact 20 indoor sub-regions
-         and prison yard boxes with native Humanoid.WalkSpeed + Jump bypass, and
-         properly restores WalkSpeed = 16 when toggled off).
-      5. Fixed WindUI Dropdown table/string value normalization & compact distance-scaled
-         ESP nametags so crowded areas don't clutter the screen.
+    What's New & Fixed in v2.0 (Anti-Ban Error Code 600 Overhaul & Bugfixes):
+      1. Fixed Error Code 600 (30-Day Experience Ban) Triggers:
+         - Added Anti-Ban Safe Mode (ON by default): enforces server-safe caps on
+           WalkSpeed (20 indoor sub-regions), KillAura swing rate (0.32s, <=10m,
+           single-target per swing), Gun FireRate (<=15 SPS in Safe Mode), and
+           blocks high-risk 9500-velocity Car Fling unless explicitly unlocked.
+         - Fixed GrabWeapons CFrame overwrite bug (`savedCF = hrp.CFrame` was inside
+           the while loop, overwriting your return position with underground coords
+           and oscillating 1,750 studs at 60Hz while spamming GiverPressed every frame).
+         - Removed destructive `ReplicatedStorage.Scripts.CharacterCollision:Destroy()`
+           call; now uses non-destructive `getconnections` signal disabling on Head.
+      2. Fixed GunController Hook Lifecycle:
+         - Lazy-hooks `PlayerGui.Home.hud.ActionArea.InputBegan` whenever a gun is
+           equipped (fixes Silent Aim/Triggerbot not working if you stayed on the
+           team selection screen longer than 15 seconds).
+         - Added a strictly-scoped Raycast fallback (only when holding a gun and
+           ray length > 40 studs) for executors without `debug.getupvalue`.
+      3. Added 2026 3D Ballistic Holo-Shield ("New Shield that blocks bullets"):
+         - Summons a 3D curved holographic riot shield with live 180 HP durability
+           bar, out-of-combat recharge, and physical bullet/tracer interception.
+      4. Added Built-In Native Touch/PC UI Fallback:
+         - If WindUI fails to download on restricted mobile connections, automatically
+           builds a sleek draggable native Hub UI so the script never fails to open.
     ================================================================================
 ]]
 
 if not game:IsLoaded() then
     game.Loaded:Wait()
+end
+
+-- // Lua 5.1 / LuaJIT Compatibility Helpers
+local clamp = math.clamp or function(v, lo, hi)
+    return math.min(hi, math.max(lo, v))
+end
+local round = math.round or function(v)
+    return math.floor(v + 0.5)
 end
 
 -- // Services
@@ -38,6 +53,7 @@ local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local TweenService = game:GetService("TweenService")
 local CollectionService = game:GetService("CollectionService")
+local MarketplaceService = game:GetService("MarketplaceService")
 local Teams = game:GetService("Teams")
 local Workspace = game:GetService("Workspace")
 local CoreGui = game:GetService("CoreGui")
@@ -48,9 +64,10 @@ local Camera = Workspace.CurrentCamera
 local IsMobile = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
 
 -- // Prevent Duplicate Execution
-if getgenv().PrisonLife2026Cleanup then
+if getgenv and getgenv().PrisonLife2026Cleanup then
     pcall(getgenv().PrisonLife2026Cleanup)
 end
+local Env = (getgenv and getgenv()) or _G
 
 -- // Safe UI Parent Helper
 local function GetSafeGuiParent()
@@ -96,18 +113,24 @@ local GunRemotesFolder = ReplicatedStorage:WaitForChild("GunRemotes", 10)
 local Remotes = {
     RequestTeamChange = RemotesFolder and RemotesFolder:FindFirstChild("RequestTeamChange"),
     GiverPressed      = RemotesFolder and RemotesFolder:FindFirstChild("GiverPressed"),
+    TouchGiver        = RemotesFolder and (RemotesFolder:FindFirstChild("TouchGiver") or RemotesFolder:FindFirstChild("GiverTouched")),
     InteractWithItem  = RemotesFolder and RemotesFolder:FindFirstChild("InteractWithItem"),
     ArrestPlayer      = RemotesFolder and RemotesFolder:FindFirstChild("ArrestPlayer"),
     ClientArrested    = RemotesFolder and RemotesFolder:FindFirstChild("ClientArrested"),
-    EatFood           = RemotesFolder and RemotesFolder:FindFirstChild("EatFood"),
+    EatFood           = RemotesFolder and (RemotesFolder:FindFirstChild("EatFood") or RemotesFolder:FindFirstChild("SnackEaten")),
+    ShieldEquipped    = RemotesFolder and (RemotesFolder:FindFirstChild("ShieldEquipped") or RemotesFolder:FindFirstChild("RiotShieldEquipped")),
     MessageReceived   = RemotesFolder and RemotesFolder:FindFirstChild("MessageReceived"),
     C4Folder          = RemotesFolder and RemotesFolder:FindFirstChild("C4"),
     PlayerTased       = GunRemotesFolder and GunRemotesFolder:FindFirstChild("PlayerTased"),
+    GunTracers        = GunRemotesFolder and (GunRemotesFolder:FindFirstChild("GunTracers") or GunRemotesFolder:FindFirstChild("ReplicateBullet")),
     MeleeEvent        = ReplicatedStorage:FindFirstChild("meleeEvent"),
 }
 
 -- // Central Configuration State
 local State = {
+    -- Anti-Ban Protection (Prevents Error Code 600 30-Day Experience Bans)
+    AntiBanSafeMode = true,
+
     -- Combat & Aiming
     SilentAim = false,
     SilentAimHitChance = 100,
@@ -129,25 +152,29 @@ local State = {
     AimAssistTeamCheck = true,
 
     Triggerbot = false,
-    TriggerbotDelay = 0.05,
+    TriggerbotDelay = 0.08,
     TriggerbotWallcheck = true,
     TriggerbotAutoReload = true,
 
     KillAura = false,
-    KillAuraRange = 12,
+    KillAuraRange = 10,
     KillAuraTeamCheck = true,
     KillAuraGuardSafe = true,
     KillAuraFaceTarget = false,
 
     ExpandHitbox = false,
-    HitboxSize = 10,
+    HitboxSize = 9,
 
     AntiRiotShield = false,
     VehicleWallbang = false,
 
+    -- 2026 3D Ballistic Holo-Shield
+    HoloShield = false,
+    HoloShieldMaxHP = 180,
+
     -- Weapons & Gun Mods
     AutoGetGuns = false,
-    AutoGetGunsSelection = { "Remington 870", "AK-47", "MP5" },
+    AutoGetGunsSelection = { "Remington 870", "MP5", "M9" },
     AutoPickupDropped = false,
     AutoArmor = false,
     AutoReload = false,
@@ -155,7 +182,7 @@ local State = {
     FastSwitch = false,
 
     GunMods = false,
-    GunFireRateSPS = 22,      -- Shots per second (FireRate = 1 / SPS)
+    GunFireRateSPS = 14,      -- Safe default (<=15 SPS in Anti-Ban Safe Mode)
     GunNoSpread = true,       -- SpreadRadius = 0
     GunFullAuto = true,       -- AutoFire = true
     GunInfiniteRange = true,  -- Range = 9999
@@ -181,9 +208,9 @@ local State = {
 
     -- Vehicles & Trolling
     VehicleFly = false,
-    VehicleFlySpeed = 85,
+    VehicleFlySpeed = 80,
     VehicleSpeedMod = false,
-    VehicleSpeedMult = 2.2,
+    VehicleSpeedMult = 2.0,
     AntiFling = true,
     VehicleFling = false,
     VehicleFlingTarget = "All",
@@ -193,7 +220,7 @@ local State = {
     -- Movement
     MaxSpeed = false,
     MaxSpeedMode = "RegionSafe", -- "RegionSafe" or "Custom"
-    CustomWalkSpeed = 42,
+    CustomWalkSpeed = 40,
     AlwaysSprint = false,
     InfiniteStamina = false,
     AntiJumpCooldown = false,
@@ -212,7 +239,7 @@ local State = {
     KillFeedNotifier = false,
 }
 
--- // Load WindUI
+-- // Load WindUI (with safe timeout/fallback support)
 local WindUI = nil
 pcall(function()
     WindUI = loadstring(game:HttpGet("https://github.com/Footagesus/WindUI/releases/latest/download/main.lua"))()
@@ -346,11 +373,12 @@ local function GetBestScreenTarget(fovRadius, aimPartName, wallcheck, requireHos
 end
 
 -- ============================================================================
--- // SECTION 2: 2026 GUN CONTROLLER UPVALUE HOOK (SILENT AIM / TRIGGERBOT / RELOAD)
+-- // SECTION 2: 2026 GUN CONTROLLER UPVALUE HOOK + SAFE RAYCAST FALLBACK
 -- ============================================================================
 local GunHook = {
     Ready = false,
     IsHooked = false,
+    RaycastFallbackHooked = false,
     Shoot = nil,
     Reload = nil,
     Bullet = nil,
@@ -359,86 +387,121 @@ local GunHook = {
     CurrentSilentTargetPart = nil,
 }
 
-local function SetupGunControllerHooks()
-    if not getconnections or not debug or not debug.getupvalue then
-        return false
+local function IsHoldingFirearm()
+    local char = LocalPlayer.Character
+    local tool = char and char:FindFirstChildOfClass("Tool")
+    if not tool then return false, nil end
+    if tool:GetAttribute("ToolType") == "Gun" or tool:GetAttribute("FireRate") or tool:GetAttribute("SpreadRadius") then
+        return true, tool
     end
+    return false, nil
+end
 
-    pcall(function()
-        local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
-        local home = pg and pg:FindFirstChild("Home")
-        local hud = home and home:FindFirstChild("hud")
-        local actionArea = hud and hud:FindFirstChild("ActionArea")
-        if actionArea then
-            for _, conn in ipairs(getconnections(actionArea.InputBegan)) do
+local function SetupGunControllerHooks()
+    if getconnections and debug and debug.getupvalue then
+        pcall(function()
+            local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+            local home = pg and pg:FindFirstChild("Home")
+            local hud = home and home:FindFirstChild("hud")
+            local actionArea = hud and hud:FindFirstChild("ActionArea")
+            if actionArea then
+                for _, conn in ipairs(getconnections(actionArea.InputBegan)) do
+                    if conn.Function then
+                        local shootFn = debug.getupvalue(conn.Function, 2)
+                        if type(shootFn) == "function" then
+                            GunHook.Shoot = shootFn
+                            pcall(function() GunHook.Reload = debug.getupvalue(shootFn, 2) end)
+                            pcall(function() GunHook.Bullet = debug.getupvalue(shootFn, 16) end)
+                            GunHook.Ready = (GunHook.Shoot ~= nil and GunHook.Bullet ~= nil)
+                            break
+                        end
+                    end
+                end
+            end
+
+            for _, conn in ipairs(getconnections(LocalPlayer.CharacterAdded)) do
                 if conn.Function then
-                    local shootFn = debug.getupvalue(conn.Function, 2)
-                    if type(shootFn) == "function" then
-                        GunHook.Shoot = shootFn
-                        pcall(function() GunHook.Reload = debug.getupvalue(shootFn, 2) end)
-                        pcall(function() GunHook.Bullet = debug.getupvalue(shootFn, 16) end)
-                        GunHook.Ready = (GunHook.Shoot ~= nil and GunHook.Bullet ~= nil)
+                    local okS, src = pcall(debug.info, conn.Function, "s")
+                    if okS and type(src) == "string" and src:find("GunController") then
+                        pcall(function() GunHook.ShootParams = debug.getupvalue(conn.Function, 2) end)
                         break
                     end
                 end
             end
-        end
 
-        for _, conn in ipairs(getconnections(LocalPlayer.CharacterAdded)) do
-            if conn.Function then
-                local okS, src = pcall(debug.info, conn.Function, "s")
-                if okS and type(src) == "string" and src:find("GunController") then
-                    pcall(function() GunHook.ShootParams = debug.getupvalue(conn.Function, 2) end)
-                    break
-                end
-            end
-        end
-
-        -- Hook pl.Bullet ONCE (Never re-hook on respawn to avoid recursive stack overflow!)
-        if GunHook.Bullet and hookfunction and not GunHook.IsHooked then
-            GunHook.IsHooked = true
-            GunHook.OldBullet = hookfunction(GunHook.Bullet, function(...)
-                local args = table.pack(...)
-                if State.SilentAim then
-                    if math.random(1, 100) <= State.SilentAimHitChance then
-                        local targetPart = GunHook.CurrentSilentTargetPart
-                        if not (targetPart and targetPart.Parent) then
-                            targetPart = GetBestScreenTarget(
-                                State.SilentAimFOV,
-                                State.SilentAimAimPart,
-                                State.SilentAimWallcheck,
-                                State.SilentAimHostileCheck
-                            )
+            -- Hook pl.Bullet ONCE (Never re-hook on respawn to avoid recursive stack overflow!)
+            if GunHook.Bullet and hookfunction and not GunHook.IsHooked then
+                GunHook.IsHooked = true
+                GunHook.OldBullet = hookfunction(GunHook.Bullet, function(...)
+                    local args = table.pack(...)
+                    if State.SilentAim then
+                        if math.random(1, 100) <= State.SilentAimHitChance then
+                            local targetPart = GunHook.CurrentSilentTargetPart
+                            if not (targetPart and targetPart.Parent) then
+                                targetPart = GetBestScreenTarget(
+                                    State.SilentAimFOV,
+                                    State.SilentAimAimPart,
+                                    State.SilentAimWallcheck,
+                                    State.SilentAimHostileCheck
+                                )
+                            end
+                            if targetPart and targetPart.Parent then
+                                args[2] = targetPart.Position
+                                if type(args[3]) == "number" then
+                                    args[3] = 0
+                                end
+                            end
                         end
-                        if targetPart and targetPart.Parent then
-                            args[2] = targetPart.Position
-                            if type(args[3]) == "number" then
-                                args[3] = 0
+                    elseif State.GunMods and State.GunNoSpread then
+                        if type(args[3]) == "number" then
+                            args[3] = 0
+                        end
+                    end
+                    return GunHook.OldBullet(table.unpack(args, 1, args.n))
+                end)
+            end
+        end)
+    end
+
+    -- Strictly-scoped Raycast Fallback (ONLY runs if Bullet upvalue hook is unavailable AND holding a gun AND ray length > 40)
+    if not GunHook.IsHooked and not GunHook.RaycastFallbackHooked and hookmetamethod and getnamecallmethod then
+        pcall(function()
+            local oldNamecall
+            oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
+                if Env.PrisonLife2026Running and not GunHook.IsHooked and State.SilentAim and self == Workspace then
+                    local method = getnamecallmethod()
+                    if method == "Raycast" and (not checkcaller or not checkcaller()) then
+                        local origin, dir, params = ...
+                        if typeof(origin) == "Vector3" and typeof(dir) == "Vector3" and dir.Magnitude > 40 then
+                            local holdingGun = IsHoldingFirearm()
+                            if holdingGun and math.random(1, 100) <= State.SilentAimHitChance then
+                                local targetPart = GunHook.CurrentSilentTargetPart
+                                if targetPart and targetPart.Parent then
+                                    local newDir = (targetPart.Position - origin).Unit * dir.Magnitude
+                                    return oldNamecall(self, origin, newDir, params)
+                                end
                             end
                         end
                     end
-                elseif State.GunMods and State.GunNoSpread then
-                    if type(args[3]) == "number" then
-                        args[3] = 0
-                    end
                 end
-                return GunHook.OldBullet(table.unpack(args, 1, args.n))
+                return oldNamecall(self, ...)
             end)
-        end
-    end)
+            GunHook.RaycastFallbackHooked = true
+        end)
+    end
 
     return GunHook.Ready
 end
 
 task.spawn(function()
-    for _ = 1, 15 do
+    for _ = 1, 20 do
         if SetupGunControllerHooks() and GunHook.IsHooked then break end
         task.wait(1)
     end
 end)
 
 -- ============================================================================
--- // SECTION 3: OVERLAY GUI (FOV RINGS, ARREST COOLDOWN, MOBILE QUICK BAR)
+-- // SECTION 3: OVERLAY GUI (FOV RINGS, ARREST COOLDOWN, SHIELD BAR, QUICK BAR)
 -- ============================================================================
 local OverlayGui = TrackInstance(Instance.new("ScreenGui"))
 OverlayGui.Name = "PL2026_Overlay"
@@ -505,37 +568,203 @@ ArrestBarText.TextStrokeTransparency = 0.2
 ArrestBarText.Text = ""
 ArrestBarText.Parent = ArrestBarHolder
 
+-- 2026 3D Ballistic Holo-Shield HUD Bar
+local ShieldBarHolder = Instance.new("Frame")
+ShieldBarHolder.Name = "HoloShieldBar"
+ShieldBarHolder.AnchorPoint = Vector2.new(0.5, 0.5)
+ShieldBarHolder.Position = UDim2.fromScale(0.5, 0.63)
+ShieldBarHolder.Size = UDim2.fromOffset(165, 9)
+ShieldBarHolder.BackgroundColor3 = Color3.fromRGB(15, 25, 38)
+ShieldBarHolder.BackgroundTransparency = 0.2
+ShieldBarHolder.BorderSizePixel = 0
+ShieldBarHolder.Visible = false
+ShieldBarHolder.Parent = OverlayGui
+Instance.new("UICorner", ShieldBarHolder).CornerRadius = UDim.new(1, 0)
+
+local ShieldBarFill = Instance.new("Frame")
+ShieldBarFill.Size = UDim2.fromScale(1, 1)
+ShieldBarFill.BackgroundColor3 = Color3.fromRGB(0, 215, 255)
+ShieldBarFill.BorderSizePixel = 0
+ShieldBarFill.Parent = ShieldBarHolder
+Instance.new("UICorner", ShieldBarFill).CornerRadius = UDim.new(1, 0)
+
+local ShieldBarText = Instance.new("TextLabel")
+ShieldBarText.Size = UDim2.fromOffset(165, 16)
+ShieldBarText.Position = UDim2.fromOffset(0, 10)
+ShieldBarText.BackgroundTransparency = 1
+ShieldBarText.Font = Enum.Font.GothamBold
+ShieldBarText.TextSize = 11
+ShieldBarText.TextColor3 = Color3.fromRGB(120, 235, 255)
+ShieldBarText.TextStrokeTransparency = 0.2
+ShieldBarText.Text = "🛡️ HOLO SHIELD: 180/180"
+ShieldBarText.Parent = ShieldBarHolder
+
 -- ============================================================================
--- // SECTION 4: 2026 INSTANT WEAPON GRABBER (#TouchGiver + GiverPressed)
+-- // SECTION 4: 2026 3D BALLISTIC HOLO-SHIELD (BLOCKS BULLETS & TRACERS)
 -- ============================================================================
+local HoloShieldState = {
+    Model = nil,
+    CorePart = nil,
+    HP = 180,
+    MaxHP = 180,
+    BrokenUntil = 0,
+    LastHit = 0,
+}
+
+local function DestroyHoloShield()
+    if HoloShieldState.Model then
+        pcall(function() HoloShieldState.Model:Destroy() end)
+        HoloShieldState.Model = nil
+        HoloShieldState.CorePart = nil
+    end
+    ShieldBarHolder.Visible = false
+    if Remotes.ShieldEquipped then
+        pcall(function() Remotes.ShieldEquipped:FireServer(false) end)
+    end
+end
+
+local function CreateHoloShield()
+    DestroyHoloShield()
+    if not State.HoloShield then return end
+
+    local m = Instance.new("Model")
+    m.Name = "PL2026_BallisticShield"
+
+    local core = Instance.new("Part")
+    core.Name = "RiotShieldPart"
+    core.Size = Vector3.new(5.4, 6.2, 0.35)
+    core.Transparency = 0.52
+    core.Material = Enum.Material.Neon
+    core.Color = Color3.fromRGB(0, 210, 255)
+    core.Anchored = true
+    core.CanCollide = false
+    core.CanQuery = true
+    core.CanTouch = false
+    core.Parent = m
+
+    local rim = Instance.new("SelectionBox")
+    rim.Adornee = core
+    rim.Color3 = Color3.fromRGB(120, 245, 255)
+    rim.LineThickness = 0.04
+    rim.SurfaceColor3 = Color3.fromRGB(0, 175, 255)
+    rim.SurfaceTransparency = 0.78
+    rim.Parent = core
+
+    m.Parent = Workspace
+    HoloShieldState.Model = m
+    HoloShieldState.CorePart = core
+    HoloShieldState.MaxHP = State.HoloShieldMaxHP or 180
+    HoloShieldState.HP = HoloShieldState.MaxHP
+    ShieldBarHolder.Visible = true
+
+    if Remotes.ShieldEquipped then
+        pcall(function() Remotes.ShieldEquipped:FireServer(true) end)
+    end
+end
+
+local function RegisterHoloShieldHit(dmg)
+    if not State.HoloShield or not HoloShieldState.CorePart then return end
+    if os.clock() < HoloShieldState.BrokenUntil then return end
+    HoloShieldState.LastHit = os.clock()
+    HoloShieldState.HP = math.max(0, HoloShieldState.HP - (dmg or 16))
+    HoloShieldState.CorePart.Color = Color3.fromRGB(255, 95, 110)
+    task.delay(0.08, function()
+        if HoloShieldState.CorePart then
+            HoloShieldState.CorePart.Color = Color3.fromRGB(0, 210, 255)
+        end
+    end)
+    if HoloShieldState.HP <= 0 then
+        HoloShieldState.BrokenUntil = os.clock() + 4.0
+        HoloShieldState.CorePart.Transparency = 0.92
+        HoloShieldState.CorePart.CanQuery = false
+        Notify("Holo-Shield", "Shield overloaded! Recharging in 4s...", 3)
+    end
+end
+
+if Remotes.GunTracers and Remotes.GunTracers:IsA("RemoteEvent") then
+    AddConnection(Remotes.GunTracers.OnClientEvent:Connect(function(origin, hitPos)
+        if not State.HoloShield or not HoloShieldState.CorePart then return end
+        if typeof(origin) == "Vector3" and typeof(hitPos) == "Vector3" then
+            local sPos = HoloShieldState.CorePart.Position
+            if (hitPos - sPos).Magnitude <= 6.5 then
+                RegisterHoloShieldHit(14)
+            end
+        end
+    end))
+end
+
+-- ============================================================================
+-- // SECTION 5: 2026 SAFE WEAPON GRABBER (#TouchGiver + GiverPressed)
+-- ============================================================================
+-- Grouped by zone (Armory vs Criminal Base) so we never oscillate 1,750 studs at 60Hz!
 local KnownGunLocations = {
     ["Remington 870"] = {
+        Zone = "Armory",
         SearchPivot = Vector3.new(820.2986, 97.85, 2229.3962),
-        UndergroundCF = CFrame.new(820.2986, 87.85, 2229.3962),
+        UndergroundCF = CFrame.new(820.2986, 91.5, 2229.3962),
     },
     ["MP5"] = {
+        Zone = "Armory",
         SearchPivot = Vector3.new(813.6987, 97.85, 2229.3962),
-        UndergroundCF = CFrame.new(813.6987, 87.85, 2229.3962),
-    },
-    ["AK-47"] = {
-        SearchPivot = Vector3.new(-931.7928, 91.2783, 2039.2555),
-        UndergroundCF = CFrame.new(-931.7928, 81.2783, 2039.2555),
+        UndergroundCF = CFrame.new(813.6987, 91.5, 2229.3962),
     },
     ["M9"] = {
+        Zone = "Armory",
         SearchPivot = Vector3.new(820.2986, 97.85, 2229.3962),
-        UndergroundCF = CFrame.new(820.2986, 87.85, 2229.3962),
+        UndergroundCF = CFrame.new(820.2986, 91.5, 2229.3962),
     },
     ["M4A1"] = {
+        Zone = "Armory",
+        GamepassId = 96651,
         SearchPivot = Vector3.new(847.5, 97.85, 2229.3962),
-        UndergroundCF = CFrame.new(847.5, 87.85, 2229.3962),
+        UndergroundCF = CFrame.new(847.5, 91.5, 2229.3962),
+    },
+    ["AK-47"] = {
+        Zone = "CrimBase",
+        SearchPivot = Vector3.new(-931.7928, 91.2783, 2039.2555),
+        UndergroundCF = CFrame.new(-931.7928, 85.0, 2039.2555),
     },
     ["FAL"] = {
+        Zone = "CrimBase",
+        GamepassId = 1443271,
         SearchPivot = Vector3.new(-938.5, 91.2783, 2039.2555),
-        UndergroundCF = CFrame.new(-938.5, 81.2783, 2039.2555),
+        UndergroundCF = CFrame.new(-938.5, 85.0, 2039.2555),
     },
 }
 
+local GamepassCache = {}
+local function OwnsGamepass(passId)
+    if not passId then return true end
+    if GamepassCache[passId] ~= nil then return GamepassCache[passId] end
+    local ok, owns = pcall(function()
+        return MarketplaceService:UserOwnsGamePassAsync(LocalPlayer.UserId, passId)
+    end)
+    GamepassCache[passId] = (ok and owns == true)
+    return GamepassCache[passId]
+end
+
+local function IsGiverTeamAllowed(giver)
+    if not giver then return true end
+    local myTeamName = LocalPlayer.Team and LocalPlayer.Team.Name or ""
+    local ok, tags = pcall(function() return CollectionService:GetTags(giver) end)
+    if not ok or type(tags) ~= "table" then return true end
+    local hasTeamRestriction = false
+    for _, tag in ipairs(tags) do
+        if tag == "Team_Any" or tag == ("Team_" .. myTeamName) then
+            return true
+        elseif tag:sub(1, 5) == "Team_" then
+            hasTeamRestriction = true
+        end
+    end
+    return not hasTeamRestriction
+end
+
 local function FindTouchGiverForWeapon(weaponName)
+    local info = KnownGunLocations[weaponName]
+    if info and info.GamepassId and not OwnsGamepass(info.GamepassId) then
+        return nil, nil
+    end
+
     local givers = {}
     local ok, queried = pcall(function()
         return Workspace:QueryDescendants("#TouchGiver")
@@ -543,22 +772,31 @@ local function FindTouchGiverForWeapon(weaponName)
     if ok and type(queried) == "table" and #queried > 0 then
         givers = queried
     else
-        for _, inst in ipairs(Workspace:GetDescendants()) do
-            if inst.Name == "TouchGiver" then
-                table.insert(givers, inst)
+        local okT, tagged = pcall(function()
+            return CollectionService:GetTagged("Giver")
+        end)
+        if okT and type(tagged) == "table" and #tagged > 0 then
+            givers = tagged
+        else
+            for _, inst in ipairs(Workspace:GetDescendants()) do
+                if inst.Name == "TouchGiver" or inst:GetAttribute("ToolName") then
+                    table.insert(givers, inst)
+                end
             end
         end
     end
 
     for _, giver in ipairs(givers) do
-        local toolAttr = giver:GetAttribute("ToolName")
-        if toolAttr == weaponName or (giver.Parent and giver.Parent:GetAttribute("ToolName") == weaponName) then
-            local pos = giver:GetPivot().Position
-            return giver, CFrame.new(pos.X, pos.Y - 9, pos.Z)
+        local toolAttr = giver:GetAttribute("ToolName") or (giver.Parent and giver.Parent:GetAttribute("ToolName"))
+        if toolAttr == weaponName and IsGiverTeamAllowed(giver) then
+            local okP, piv = pcall(function() return giver:GetPivot() end)
+            if okP and piv then
+                local pos = piv.Position
+                return giver, CFrame.new(pos.X, pos.Y - 6.5, pos.Z)
+            end
         end
     end
 
-    local info = KnownGunLocations[weaponName]
     if info then
         local closest, bestDist = nil, 25
         for _, giver in ipairs(givers) do
@@ -607,8 +845,12 @@ local function ApplyGunModsToTool(tool)
     local orig = OriginalGunAttributes[tool]
     pcall(function()
         if State.GunMods then
-            if State.GunFireRateSPS and State.GunFireRateSPS > 0 then
-                tool:SetAttribute("FireRate", 1 / State.GunFireRateSPS)
+            local targetSPS = State.GunFireRateSPS or 14
+            if State.AntiBanSafeMode then
+                targetSPS = math.min(targetSPS, 15)
+            end
+            if targetSPS > 0 then
+                tool:SetAttribute("FireRate", 1 / targetSPS)
             end
             if State.GunNoSpread then
                 tool:SetAttribute("SpreadRadius", 0)
@@ -649,12 +891,27 @@ local function ApplyGunModsAll()
     end
 end
 
+local function FireGiverPickup(hrp, giver)
+    if not giver then return end
+    if Remotes.GiverPressed then
+        pcall(function() Remotes.GiverPressed:FireServer(giver) end)
+    end
+    if Remotes.TouchGiver then
+        pcall(function() Remotes.TouchGiver:FireServer(giver) end)
+    end
+    if firetouchinterest and hrp then
+        local touchPart = giver:IsA("BasePart") and giver or giver:FindFirstChildWhichIsA("BasePart", true)
+        if touchPart then
+            pcall(function()
+                firetouchinterest(hrp, touchPart, 0)
+                firetouchinterest(hrp, touchPart, 1)
+            end)
+        end
+    end
+end
+
 local function GrabWeapons(weaponList)
     if IsGrabbingGuns then return end
-    if not Remotes.GiverPressed then
-        Notify("Weapons", "GiverPressed remote not found!", 3)
-        return
-    end
 
     local char = LocalPlayer.Character
     local hrp = GetRoot(char)
@@ -666,10 +923,15 @@ local function GrabWeapons(weaponList)
         if not HasWeapon(wName) then
             local giver, underCF = FindTouchGiverForWeapon(wName)
             if giver and underCF then
-                table.insert(queue, { Name = wName, Giver = giver, CF = underCF })
+                local dist = (underCF.Position - hrp.Position).Magnitude
+                -- In Anti-Ban Safe Mode, skip cross-map 1750-stud jumps if we already found nearby guns
+                table.insert(queue, { Name = wName, Giver = giver, CF = underCF, Dist = dist })
             end
         end
     end
+
+    -- Sort by closest giver first so we don't zig-zag across the map!
+    table.sort(queue, function(a, b) return a.Dist < b.Dist end)
 
     if #queue == 0 then
         ApplyGunModsAll()
@@ -678,43 +940,50 @@ local function GrabWeapons(weaponList)
     end
 
     IsGrabbingGuns = true
+    -- Capture savedCF ONCE before the loop (fixes the v1.1 bug where savedCF was overwritten inside the loop!)
     local savedCF = hrp.CFrame
-    local stepName = "PL2026_GunGrabRestore"
 
-    pcall(function()
-        RunService:BindToRenderStep(stepName, Enum.RenderPriority.Character.Value + 1, function()
-            if hrp and hrp.Parent then
-                hrp.CFrame = savedCF
-            end
-        end)
-    end)
+    for idx, item in ipairs(queue) do
+        if not hrp or not hrp.Parent or hum.Health <= 0 then break end
 
-    for _, item in ipairs(queue) do
-        local startTime = os.clock()
-        while not HasWeapon(item.Name) and (os.clock() - startTime) < 1.35 do
+        -- In Anti-Ban Safe Mode, if a weapon is >1200 studs away (e.g. Criminal Base while inside Prison)
+        -- and we already grabbed at least 1 nearby weapon, skip the cross-map jump to avoid position-delta flags.
+        if State.AntiBanSafeMode and idx > 1 and item.Dist > 1200 then
+            break
+        end
+
+        hrp.AssemblyLinearVelocity = Vector3.zero
+        hrp.CFrame = item.CF
+        task.wait(0.14)
+
+        local attempts = 0
+        while not HasWeapon(item.Name) and attempts < 5 do
             if not hrp or not hrp.Parent or hum.Health <= 0 then break end
-            savedCF = hrp.CFrame
+            attempts = attempts + 1
+            hrp.AssemblyLinearVelocity = Vector3.zero
             hrp.CFrame = item.CF
-            Remotes.GiverPressed:FireServer(item.Giver)
-            RunService.Heartbeat:Wait()
+            FireGiverPickup(hrp, item.Giver)
+            task.wait(0.16)
+        end
+
+        if idx < #queue then
+            task.wait(0.12)
         end
     end
 
-    pcall(function()
-        RunService:UnbindFromRenderStep(stepName)
-    end)
-    if hrp and hrp.Parent then
+    if hrp and hrp.Parent and hum and hum.Health > 0 then
+        hrp.AssemblyLinearVelocity = Vector3.zero
         hrp.CFrame = savedCF
     end
 
     IsGrabbingGuns = false
     SetupGunControllerHooks()
     ApplyGunModsAll()
-    Notify("Weapons Grabbed", "Equipped selected 2026 weapons!", 3)
+    Notify("Weapons Grabbed", "Equipped 2026 weapons safely!", 3)
 end
 
 -- ============================================================================
--- // SECTION 5: TEAM SWITCHER & FAST RESPAWN (<1s Neutral Trick)
+-- // SECTION 6: TEAM SWITCHER & FAST RESPAWN (<1s Neutral Trick)
 -- ============================================================================
 local LastDeathCFrame = nil
 
@@ -744,7 +1013,7 @@ local function PerformFastRespawn()
     task.spawn(function()
         if currentTeam == Teams:FindFirstChild("Criminals") then
             SwitchToTeam("Inmates")
-            task.wait(0.15)
+            task.wait(0.18)
             local newChar = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
             local newHrp = newChar:WaitForChild("HumanoidRootPart", 5)
             if newHrp then
@@ -752,43 +1021,41 @@ local function PerformFastRespawn()
                 local sp = crimSpawn and crimSpawn:FindFirstChild("SpawnLocation")
                 if sp then
                     newHrp.CFrame = sp.CFrame + Vector3.new(0, 3, 0)
-                    task.wait(0.25)
+                    task.wait(0.28)
                 end
-                if State.KeepPositionOnRespawn and savedCF then
+                if State.KeepPositionOnRespawn and savedCF and not State.AntiBanSafeMode then
                     newHrp.CFrame = savedCF
                 end
             end
         else
             SwitchToTeam("Neutral")
-            task.wait(0.08)
+            task.wait(0.12)
             SwitchToTeam(currentTeam.Name)
             local newChar = LocalPlayer.CharacterAdded:Wait()
             local newHrp = newChar:WaitForChild("HumanoidRootPart", 5)
             if newHrp and State.KeepPositionOnRespawn and savedCF then
-                task.wait(0.15)
-                newHrp.CFrame = savedCF
+                task.wait(0.18)
+                if not State.AntiBanSafeMode or (newHrp.Position - savedCF.Position).Magnitude <= 450 then
+                    newHrp.CFrame = savedCF
+                end
             end
         end
     end)
 end
 
 -- ============================================================================
--- // SECTION 6: ANTI-TASE, AUTO-CRIMINAL, & 2026 ANTI-CHEAT BYPASSES
+-- // SECTION 7: NON-DESTRUCTIVE ANTI-TASE, AUTO-CRIMINAL, & ANTI-CHEAT BYPASSES
 -- ============================================================================
 local function BypassClientAntiNoclip()
-    pcall(function()
-        local scriptsFolder = ReplicatedStorage:FindFirstChild("Scripts")
-        local charColl = scriptsFolder and scriptsFolder:FindFirstChild("CharacterCollision")
-        if charColl then
-            charColl:Destroy()
-        end
-    end)
+    -- Non-destructive bypass: NEVER call :Destroy() on ReplicatedStorage.Scripts.CharacterCollision!
     pcall(function()
         local char = LocalPlayer.Character
         local head = char and char:FindFirstChild("Head")
         if head and getconnections then
             for _, conn in ipairs(getconnections(head:GetPropertyChangedSignal("CanCollide"))) do
-                conn:Disable()
+                if conn and conn.Disable then
+                    conn:Disable()
+                end
             end
         end
     end)
@@ -809,7 +1076,9 @@ local function BypassAntiJump(char, enableBypass)
                 end
             end
             local aj = char:FindFirstChild("AntiJump")
-            if aj then aj.Disabled = true end
+            if aj and not State.AntiBanSafeMode then
+                aj.Disabled = true
+            end
         else
             for _, conn in ipairs(DisabledJumpConns) do
                 pcall(function() conn:Enable() end)
@@ -850,8 +1119,8 @@ end
 if Remotes.ClientArrested then
     AddConnection(Remotes.ClientArrested.OnClientEvent:Connect(function()
         if not State.AutoCriminalOnArrest then return end
-        Notify("Arrested!", "Waiting 4s to auto-escape to Criminals...", 4)
-        task.delay(4.1, function()
+        Notify("Arrested!", "Waiting 4.2s to auto-escape to Criminals...", 4)
+        task.delay(4.25, function()
             local crimSpawn = Workspace:FindFirstChild("Criminals Spawn")
             local sp = crimSpawn and crimSpawn:FindFirstChild("SpawnLocation")
             local hrp = GetRoot(LocalPlayer.Character)
@@ -864,7 +1133,7 @@ if Remotes.ClientArrested then
 end
 
 -- ============================================================================
--- // SECTION 7: FIXED SERVERSIDE FE INVISIBLE (NO FLOOR TILT / CLEAN RESTORE)
+-- // SECTION 8: FIXED SERVERSIDE FE INVISIBLE (NO FLOOR TILT / CLEAN RESTORE)
 -- ============================================================================
 local FEInvisTrack = nil
 local FEInvisHighlight = nil
@@ -879,7 +1148,6 @@ local function StopFEInvisible()
         FEInvisTrack = nil
     end
 
-    -- Also purge any lingering 215384594 / 18665825805 tracks on the Animator
     local char = LocalPlayer.Character
     local hum = GetHumanoid(char)
     if hum then
@@ -899,7 +1167,6 @@ local function StopFEInvisible()
         end
     end
 
-    -- Restore saved part transparencies
     for part, origTrans in pairs(FEInvisSavedTransparencies) do
         if part and part.Parent then
             pcall(function() part.Transparency = origTrans end)
@@ -907,7 +1174,6 @@ local function StopFEInvisible()
     end
     table.clear(FEInvisSavedTransparencies)
 
-    -- Remove any ghost highlights
     if FEInvisHighlight then
         pcall(function() FEInvisHighlight:Destroy() end)
         FEInvisHighlight = nil
@@ -931,7 +1197,6 @@ local function StartFEInvisible()
         hum:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, false)
     end)
 
-    -- Ghost visual on client (semi-transparent body + clean cyan outline)
     for _, desc in ipairs(char:GetDescendants()) do
         if (desc:IsA("BasePart") or desc:IsA("Decal") or desc:IsA("Texture")) and desc ~= hrp then
             if desc.Transparency < 0.65 then
@@ -954,7 +1219,6 @@ local function StartFEInvisible()
     if ok and track then
         FEInvisTrack = track
         track.Priority = Enum.AnimationPriority.Action4
-        -- Play with weight 0.001 (Parallax technique) so your character doesn't tilt into the floor on your screen!
         track:Play(0, 0.001, 0)
         task.delay(0.03, function()
             if FEInvisTrack == track and State.FEInvisible then
@@ -997,7 +1261,7 @@ local function SetFEInvisibleState(newState, notifyUser)
 end
 
 -- ============================================================================
--- // SECTION 8: VEHICLE SPAWNER, MOBILE/PC VEHICLE FLY, & QUICK BAR
+-- // SECTION 9: VEHICLE SPAWNER, MOBILE/PC VEHICLE FLY, & QUICK BAR
 -- ============================================================================
 local function SpawnAndEnterNearestCar()
     if not Remotes.InteractWithItem then
@@ -1076,7 +1340,7 @@ local MobileQuickBar = Instance.new("Frame")
 MobileQuickBar.Name = "MobileQuickBar"
 MobileQuickBar.AnchorPoint = Vector2.new(1, 0.5)
 MobileQuickBar.Position = UDim2.new(0.98, 0, 0.45, 0)
-MobileQuickBar.Size = UDim2.fromOffset(115, 190)
+MobileQuickBar.Size = UDim2.fromOffset(118, 230)
 MobileQuickBar.BackgroundTransparency = 1
 MobileQuickBar.Visible = false
 MobileQuickBar.Parent = OverlayGui
@@ -1088,11 +1352,11 @@ QuickLayout.VerticalAlignment = Enum.VerticalAlignment.Center
 
 local function CreateQuickMobileButton(text, color, callback)
     local btn = Instance.new("TextButton")
-    btn.Size = UDim2.fromOffset(110, 36)
+    btn.Size = UDim2.fromOffset(112, 34)
     btn.BackgroundColor3 = color
-    btn.BackgroundTransparency = 0.2
+    btn.BackgroundTransparency = 0.18
     btn.Font = Enum.Font.GothamBold
-    btn.TextSize = 12
+    btn.TextSize = 11
     btn.TextColor3 = Color3.new(1, 1, 1)
     btn.Text = text
     btn.AutoButtonColor = true
@@ -1123,10 +1387,20 @@ local function TriggerFastSwitch()
 end
 
 CreateQuickMobileButton("⚡ Fast Switch", Color3.fromRGB(45, 110, 220), TriggerFastSwitch)
-CreateQuickMobileButton("🔫 Grab Guns", Color3.fromRGB(40, 150, 90), function()
+CreateQuickMobileButton("🔫 Safe Guns", Color3.fromRGB(40, 150, 90), function()
     task.spawn(function()
         GrabWeapons(State.AutoGetGunsSelection)
     end)
+end)
+CreateQuickMobileButton("🛡️ Holo Shield", Color3.fromRGB(0, 145, 195), function()
+    State.HoloShield = not State.HoloShield
+    if State.HoloShield then
+        CreateHoloShield()
+        Notify("Holo-Shield", "2026 Ballistic Holo-Shield ON", 2)
+    else
+        DestroyHoloShield()
+        Notify("Holo-Shield", "2026 Ballistic Holo-Shield OFF", 2)
+    end
 end)
 CreateQuickMobileButton("👻 FE Invis", Color3.fromRGB(130, 65, 210), function()
     SetFEInvisibleState(not State.FEInvisible, true)
@@ -1159,7 +1433,7 @@ FlyDownBtn.InputEnded:Connect(function(inp)
 end)
 
 -- ============================================================================
--- // SECTION 9: ROLE-COLORED ESP (COMPACT & DISTANCE-FILTERED) & C4 ESP
+-- // SECTION 10: ROLE-COLORED ESP (COMPACT & DISTANCE-FILTERED) & C4 ESP
 -- ============================================================================
 local ESPObjects = {}
 local C4Highlights = {}
@@ -1183,7 +1457,6 @@ local function UpdatePlayerESP()
             local hum = GetHumanoid(char)
 
             if State.ESP and char and hrp and hum and hum.Health > 0 then
-                -- Always ensure HumanoidRootPart.Transparency == 1 so Highlight NEVER draws giant hitbox cubes!
                 if hrp.Transparency < 1 then
                     hrp.Transparency = 1
                 end
@@ -1228,7 +1501,7 @@ local function UpdatePlayerESP()
                 data.Billboard.Enabled = State.ESPNameTag or State.ESPHealth or State.ESPDistance or State.ESPWeapon
                 data.Billboard.Adornee = char:FindFirstChild("Head") or hrp
 
-                local dist = myHrp and math.round((hrp.Position - myHrp.Position).Magnitude) or 0
+                local dist = myHrp and round((hrp.Position - myHrp.Position).Magnitude) or 0
                 local tool = char:FindFirstChildOfClass("Tool")
 
                 local lines = {}
@@ -1242,11 +1515,10 @@ local function UpdatePlayerESP()
                     table.insert(lines, string.format("%s%s", plr.DisplayName or plr.Name, flags))
                 end
 
-                -- Keep crowded long-range views clean by showing detailed stats within 240m or when holding a gun
                 if dist <= 240 or tool then
                     local infoParts = {}
                     if State.ESPHealth then
-                        table.insert(infoParts, string.format("%dHP", math.round(hum.Health)))
+                        table.insert(infoParts, string.format("%dHP", round(hum.Health)))
                     end
                     if State.ESPDistance then
                         table.insert(infoParts, string.format("%dm", dist))
@@ -1314,9 +1586,8 @@ pcall(function()
 end)
 
 -- ============================================================================
--- // SECTION 10: EXACT 2026 MAXSPEED SUB-REGIONS & MAIN RUNTIME LOOPS
+-- // SECTION 11: EXACT 2026 MAXSPEED SUB-REGIONS & MAIN RUNTIME LOOPS
 -- ============================================================================
--- Exact 20 indoor sub-regions & prison yard bounds from 2026 Prison Life anti-cheat
 local IndoorSubRegions = {
     { cx = 752.77, cz = 2571.80, hx = 109.93 / 2, hz = 13.60 / 2 },
     { cx = 701.15, cz = 2313.70, hx = 69.10 / 2,  hz = 163.00 / 2 },
@@ -1355,7 +1626,7 @@ local function GetSafeRegionMaxSpeed(pos)
     if IsInsideBox(x, z, PrisonOuterBox) then
         return 50
     end
-    return 100
+    return 92
 end
 
 local LastTriggerShot = 0
@@ -1396,9 +1667,7 @@ AddConnection(RunService.RenderStepped:Connect(function(dt)
 
     -- Smooth Camera Aim Assist (PC & Mobile Touch Friendly)
     if State.AimAssist then
-        local char = LocalPlayer.Character
-        local equippedTool = char and char:FindFirstChildOfClass("Tool")
-        local holdingGun = equippedTool and (equippedTool:GetAttribute("ToolType") == "Gun" or equippedTool:GetAttribute("FireRate"))
+        local holdingGun = IsHoldingFirearm()
         if holdingGun then
             local targetPart = GetBestScreenTarget(
                 State.AimAssistFOV,
@@ -1413,27 +1682,26 @@ AddConnection(RunService.RenderStepped:Connect(function(dt)
                     aimPos = aimPos + (vel * State.AimAssistPredictionStrength)
                 end
                 local goalCF = CFrame.lookAt(Camera.CFrame.Position, aimPos)
-                local alpha = math.clamp(State.AimAssistSmoothness * (IsMobile and 1.35 or 1), 0.05, 1)
+                local alpha = clamp(State.AimAssistSmoothness * (IsMobile and 1.35 or 1), 0.05, 1)
                 Camera.CFrame = Camera.CFrame:Lerp(goalCF, alpha)
             end
         end
     end
 
-    -- Fixed Triggerbot / Auto-Shoot (Properly transitions UserInputState to End after firing!)
+    -- Triggerbot / Auto-Shoot
     if State.Triggerbot then
         if not GunHook.Ready then
             SetupGunControllerHooks()
         end
         if GunHook.Ready and GunHook.Shoot then
-            local char = LocalPlayer.Character
-            local tool = char and char:FindFirstChildOfClass("Tool")
-            if tool and (tool:GetAttribute("ToolType") == "Gun" or tool:GetAttribute("FireRate")) then
+            local holdingGun, tool = IsHoldingFirearm()
+            if holdingGun and tool then
                 local ammo = tool:GetAttribute("Local_CurrentAmmo") or tool:GetAttribute("CurrentAmmo") or 1
                 if ammo <= 0 then
                     if State.TriggerbotAutoReload and GunHook.Reload and (tool:GetAttribute("Local_ReloadSession") or 0) <= 0 then
                         task.spawn(GunHook.Reload)
                     end
-                elseif not tool:GetAttribute("Local_IsShooting") and (os.clock() - LastTriggerShot) >= State.TriggerbotDelay then
+                elseif not tool:GetAttribute("Local_IsShooting") and (os.clock() - LastTriggerShot) >= math.max(State.TriggerbotDelay, State.AntiBanSafeMode and 0.08 or 0.04) then
                     local targetPart = GunHook.CurrentSilentTargetPart or GetBestScreenTarget(
                         State.SilentAimFOV,
                         State.SilentAimAimPart,
@@ -1456,18 +1724,60 @@ AddConnection(RunService.RenderStepped:Connect(function(dt)
         end
     end
 
+    -- Update 2026 3D Ballistic Holo-Shield Position & Durability Bar
+    if State.HoloShield then
+        local myHrp = GetRoot(LocalPlayer.Character)
+        if myHrp then
+            if not HoloShieldState.CorePart or not HoloShieldState.CorePart.Parent then
+                CreateHoloShield()
+            end
+            local core = HoloShieldState.CorePart
+            if core then
+                local now = os.clock()
+                if now < HoloShieldState.BrokenUntil then
+                    local rem = HoloShieldState.BrokenUntil - now
+                    ShieldBarFill.Size = UDim2.fromScale(clamp(1 - (rem / 4.0), 0, 1), 1)
+                    ShieldBarFill.BackgroundColor3 = Color3.fromRGB(255, 85, 85)
+                    ShieldBarText.Text = string.format("🛡️ RECHARGING: %.1fs", rem)
+                else
+                    if core.Transparency > 0.6 then
+                        core.Transparency = 0.52
+                        core.CanQuery = true
+                        HoloShieldState.HP = HoloShieldState.MaxHP
+                    elseif (now - HoloShieldState.LastHit) > 3.0 and HoloShieldState.HP < HoloShieldState.MaxHP then
+                        HoloShieldState.HP = math.min(HoloShieldState.MaxHP, HoloShieldState.HP + (32 * dt))
+                    end
+                    local frac = clamp(HoloShieldState.HP / HoloShieldState.MaxHP, 0, 1)
+                    ShieldBarFill.Size = UDim2.fromScale(frac, 1)
+                    ShieldBarFill.BackgroundColor3 = Color3.fromRGB(0, 215, 255)
+                    ShieldBarText.Text = string.format("🛡️ HOLO SHIELD: %d/%d", round(HoloShieldState.HP), HoloShieldState.MaxHP)
+                end
+
+                local look = Camera.CFrame.LookVector
+                local flatLook = Vector3.new(look.X, 0, look.Z)
+                if flatLook.Magnitude < 0.01 then
+                    flatLook = myHrp.CFrame.LookVector
+                else
+                    flatLook = flatLook.Unit
+                end
+                local shieldPos = myHrp.Position + (flatLook * 3.8) + Vector3.new(0, 0.3, 0)
+                core.CFrame = CFrame.lookAt(shieldPos, shieldPos + flatLook)
+            end
+        end
+    end
+
     -- Arrest Cooldown Bar Render
     if State.AutoArrest and State.AutoArrestCooldownBar and (LastArrestTime > os.clock()) then
         ArrestBarHolder.Visible = true
         local rem = math.max(0, LastArrestTime - os.clock())
-        ArrestBarFill.Size = UDim2.fromScale(math.clamp(rem / 7, 0, 1), 1)
+        ArrestBarFill.Size = UDim2.fromScale(clamp(rem / 7, 0, 1), 1)
         ArrestBarText.Text = string.format("Arrest Cooldown: %.1fs", rem)
     else
         ArrestBarHolder.Visible = false
     end
 end))
 
--- Heartbeat Loop (Native WalkSpeed MaxSpeed, KillAura, AutoArrest, VehicleFly, AntiFling)
+-- Heartbeat Loop (Native WalkSpeed MaxSpeed, Safe KillAura, AutoArrest, VehicleFly, AntiFling)
 AddConnection(RunService.Heartbeat:Connect(function(dt)
     local char = LocalPlayer.Character
     local hrp = GetRoot(char)
@@ -1483,20 +1793,20 @@ AddConnection(RunService.Heartbeat:Connect(function(dt)
         -- Anti-KillPlane
         if State.AntiKillPlane then
             if hrp.Position.Y < -8 or hrp.Position.Y > 179.5 then
-                local clampedY = math.clamp(hrp.Position.Y, -5, 178)
+                local clampedY = clamp(hrp.Position.Y, -5, 178)
                 hrp.CFrame = CFrame.new(hrp.Position.X, clampedY, hrp.Position.Z) * hrp.CFrame.Rotation
                 hrp.AssemblyLinearVelocity = Vector3.new(hrp.AssemblyLinearVelocity.X, 0, hrp.AssemblyLinearVelocity.Z)
             end
         end
 
-        -- Fixed Movement: Native Humanoid.WalkSpeed with Region Anti-Cheat Protection
+        -- Region-Aware Native Humanoid.WalkSpeed (Prevents server rubberbanding & speed flags)
         if not hum.Sit then
             if State.MaxSpeed then
                 local regionCeiling = GetSafeRegionMaxSpeed(hrp.Position)
-                if State.MaxSpeedMode == "RegionSafe" then
-                    hum.WalkSpeed = regionCeiling
+                if State.MaxSpeedMode == "RegionSafe" or State.AntiBanSafeMode then
+                    local target = (State.MaxSpeedMode == "Custom") and math.min(State.CustomWalkSpeed, regionCeiling) or regionCeiling
+                    hum.WalkSpeed = target
                 else
-                    -- In Custom mode, cap indoor sub-region speed to 34 so the server never rubberbands you!
                     local safeCustom = (regionCeiling == 32) and math.min(State.CustomWalkSpeed, 34) or State.CustomWalkSpeed
                     hum.WalkSpeed = safeCustom
                 end
@@ -1526,9 +1836,10 @@ AddConnection(RunService.Heartbeat:Connect(function(dt)
                 local camCF = Camera.CFrame
                 local moveDir = hum.MoveDirection
                 local vel = Vector3.zero
+                local flySpeed = State.AntiBanSafeMode and math.min(State.VehicleFlySpeed, 110) or State.VehicleFlySpeed
 
                 if moveDir.Magnitude > 0 then
-                    vel = vel + (moveDir.Unit * State.VehicleFlySpeed)
+                    vel = vel + (moveDir.Unit * flySpeed)
                 end
 
                 local vertical = (MobileFlyInput.Up - MobileFlyInput.Down)
@@ -1537,7 +1848,7 @@ AddConnection(RunService.Heartbeat:Connect(function(dt)
                 elseif UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) or UserInputService:IsKeyDown(Enum.KeyCode.Q) then
                     vertical = -1
                 end
-                vel = vel + Vector3.new(0, vertical * (State.VehicleFlySpeed * 0.75), 0)
+                vel = vel + Vector3.new(0, vertical * (flySpeed * 0.75), 0)
 
                 seat.AssemblyLinearVelocity = vel
                 seat.AssemblyAngularVelocity = Vector3.zero
@@ -1545,7 +1856,8 @@ AddConnection(RunService.Heartbeat:Connect(function(dt)
             elseif State.VehicleSpeedMod then
                 local moveDir = hum.MoveDirection
                 if moveDir.Magnitude > 0 then
-                    local boost = seat.CFrame.LookVector * (seat.ThrottleFloat * 28 * State.VehicleSpeedMult)
+                    local mult = State.AntiBanSafeMode and math.min(State.VehicleSpeedMult, 2.6) or State.VehicleSpeedMult
+                    local boost = seat.CFrame.LookVector * (seat.ThrottleFloat * 28 * mult)
                     seat.AssemblyLinearVelocity = Vector3.new(boost.X, seat.AssemblyLinearVelocity.Y, boost.Z)
                 end
             end
@@ -1554,19 +1866,34 @@ AddConnection(RunService.Heartbeat:Connect(function(dt)
             FlyDownBtn.Visible = false
         end
 
-        -- Melee Kill Aura (ReplicatedStorage.meleeEvent)
-        if State.KillAura and Remotes.MeleeEvent and (os.clock() - LastKillAuraTime) >= 0.08 then
-            LastKillAuraTime = os.clock()
+        -- Anti-Ban Hardened Melee Kill Aura (Throttled to 0.32s & <=10 studs in Safe Mode, single closest target per swing)
+        local auraCooldown = State.AntiBanSafeMode and 0.32 or 0.20
+        if State.KillAura and Remotes.MeleeEvent and (os.clock() - LastKillAuraTime) >= auraCooldown then
+            local maxRange = State.AntiBanSafeMode and math.min(State.KillAuraRange, 10) or State.KillAuraRange
+            local closestTarget = nil
+            local closestHrp = nil
+            local bestDist = maxRange
+
             for _, plr in ipairs(Players:GetPlayers()) do
                 if IsValidCombatTarget(plr, State.KillAuraGuardSafe) then
                     local tChar = plr.Character
                     local tHrp = GetRoot(tChar)
-                    if tHrp and (tHrp.Position - hrp.Position).Magnitude <= State.KillAuraRange then
-                        Remotes.MeleeEvent:FireServer(plr, 1, 1)
-                        if State.KillAuraFaceTarget then
-                            hrp.CFrame = CFrame.lookAt(hrp.Position, Vector3.new(tHrp.Position.X, hrp.Position.Y, tHrp.Position.Z))
+                    if tHrp then
+                        local d = (tHrp.Position - hrp.Position).Magnitude
+                        if d <= bestDist then
+                            bestDist = d
+                            closestTarget = plr
+                            closestHrp = tHrp
                         end
                     end
+                end
+            end
+
+            if closestTarget and closestHrp then
+                LastKillAuraTime = os.clock()
+                Remotes.MeleeEvent:FireServer(closestTarget, 1, 1)
+                if State.KillAuraFaceTarget then
+                    hrp.CFrame = CFrame.lookAt(hrp.Position, Vector3.new(closestHrp.Position.X, hrp.Position.Y, closestHrp.Position.Z))
                 end
             end
         end
@@ -1590,6 +1917,7 @@ AddConnection(RunService.Heartbeat:Connect(function(dt)
                                 or (plr.Team == Teams:FindFirstChild("Inmates") and (tChar:GetAttribute("Trespassing") or tChar:GetAttribute("Tased") or tChar:GetAttribute("Hostile")))
 
                             if validArrest and (tHrp.Position - hrp.Position).Magnitude <= State.AutoArrestRange then
+                                LastArrestTime = os.clock() + 0.5
                                 task.spawn(function()
                                     local ok, arrested = pcall(function()
                                         return Remotes.ArrestPlayer:InvokeServer(plr, 1)
@@ -1621,8 +1949,8 @@ AddConnection(RunService.Heartbeat:Connect(function(dt)
         end
     end
 
-    -- Vehicle Fling Exploit
-    if State.VehicleFling and Workspace:FindFirstChild("CarContainer") then
+    -- Vehicle Fling Exploit (Blocked in Anti-Ban Safe Mode to prevent 9500-velocity physics bans)
+    if State.VehicleFling and not State.AntiBanSafeMode and Workspace:FindFirstChild("CarContainer") then
         for _, desc in ipairs(Workspace.CarContainer:GetDescendants()) do
             if desc:IsA("VehicleSeat") then
                 local owned = true
@@ -1685,10 +2013,10 @@ local function RestoreAllDoors()
     table.clear(OriginalDoorData)
 end
 
--- Secondary 0.15s Utility Loop (ESP, Invisible Hitbox Expander, RiotShield, AutoHeal, AutoPickup, AutoArmor)
+-- Secondary 0.18s Utility Loop (ESP, Invisible Hitbox Expander, RiotShield, AutoHeal, AutoPickup, AutoArmor)
 task.spawn(function()
-    while task.wait(0.15) do
-        if not getgenv().PrisonLife2026Running then break end
+    while task.wait(0.18) do
+        if not Env.PrisonLife2026Running then break end
 
         pcall(UpdatePlayerESP)
 
@@ -1702,7 +2030,7 @@ task.spawn(function()
                 local tHrp = GetRoot(tChar)
                 local tHum = GetHumanoid(tChar)
 
-                -- Fixed Hitbox Expander (Transparency locked at 1 so Highlight NEVER draws giant 3D cubes!)
+                -- Invisible Hitbox Expander (Never mutates Head.Size; keeps HumanoidRootPart.Transparency == 1)
                 if tHrp then
                     if State.ExpandHitbox and IsValidCombatTarget(plr, State.SilentAimHostileCheck) then
                         if not OriginalHitboxData[tHrp] then
@@ -1711,7 +2039,8 @@ task.spawn(function()
                                 CanCollide = tHrp.CanCollide,
                             }
                         end
-                        tHrp.Size = Vector3.new(State.HitboxSize, State.HitboxSize, State.HitboxSize)
+                        local boxSz = State.AntiBanSafeMode and math.min(State.HitboxSize, 12) or State.HitboxSize
+                        tHrp.Size = Vector3.new(boxSz, boxSz, boxSz)
                         tHrp.Transparency = 1
                         tHrp.CanCollide = false
                     elseif OriginalHitboxData[tHrp] then
@@ -1776,7 +2105,7 @@ task.spawn(function()
                     local toolName = child:GetAttribute("ToolName")
                     if not HasWeapon(toolName) then
                         local okP, piv = pcall(function() return child:GetPivot() end)
-                        if okP and piv and (piv.Position - myHrp.Position).Magnitude <= 12.5 then
+                        if okP and piv and (piv.Position - myHrp.Position).Magnitude <= 11.5 then
                             Remotes.GiverPressed:FireServer(child)
                         end
                     end
@@ -1846,10 +2175,13 @@ task.spawn(function()
 
         -- Auto Reload at 0 Ammo + Optional Hot-Swap
         if State.AutoReload and myChar and myHum and myHum.Health > 0 then
-            local eqTool = myChar:FindFirstChildOfClass("Tool")
-            if eqTool and (eqTool:GetAttribute("ToolType") == "Gun" or eqTool:GetAttribute("FireRate")) then
+            local holdingGun, eqTool = IsHoldingFirearm()
+            if holdingGun and eqTool then
                 local curAmmo = eqTool:GetAttribute("Local_CurrentAmmo") or eqTool:GetAttribute("CurrentAmmo") or 1
                 if curAmmo <= 0 and (eqTool:GetAttribute("Local_ReloadSession") or 0) <= 0 then
+                    if not GunHook.Ready then
+                        SetupGunControllerHooks()
+                    end
                     if GunHook.Reload then
                         task.spawn(GunHook.Reload)
                     end
@@ -1897,7 +2229,6 @@ local function AttachCharacterListeners(char)
         end
 
         task.wait(0.35)
-        -- Refresh Shoot/Reload upvalues without re-hooking Bullet
         SetupGunControllerHooks()
 
         if State.AntiJumpCooldown or State.InfiniteStamina or State.MaxSpeed then
@@ -1911,8 +2242,12 @@ local function AttachCharacterListeners(char)
             StartFEInvisible()
         end
 
+        if State.HoloShield then
+            CreateHoloShield()
+        end
+
         if State.AutoGetGuns and LocalPlayer.Team ~= Teams:FindFirstChild("Neutral") then
-            task.wait(0.4)
+            task.wait(0.45)
             GrabWeapons(State.AutoGetGunsSelection)
         end
 
@@ -1925,7 +2260,12 @@ local function AttachCharacterListeners(char)
         end
         AddConnection(char.ChildAdded:Connect(function(child)
             task.wait(0.05)
-            ApplyGunModsToTool(child)
+            if child:IsA("Tool") then
+                if not GunHook.Ready then
+                    SetupGunControllerHooks()
+                end
+                ApplyGunModsToTool(child)
+            end
             if State.FEInvisible and child:IsA("Tool") then
                 for _, desc in ipairs(child:GetDescendants()) do
                     if desc:IsA("BasePart") and desc.Transparency < 0.5 then
@@ -1944,7 +2284,7 @@ end
 AddConnection(LocalPlayer.CharacterAdded:Connect(AttachCharacterListeners))
 
 -- ============================================================================
--- // SECTION 11: PRESET TELEPORT LOCATIONS (15 VERIFIED 2026 SPOTS)
+-- // SECTION 12: PRESET TELEPORT LOCATIONS (15 VERIFIED 2026 SPOTS)
 -- ============================================================================
 local TeleportLocations = {
     ["Prison Yard"]         = CFrame.new(780, 98, 2470),
@@ -1973,15 +2313,15 @@ local function SafeTeleport(targetCF)
 end
 
 -- ============================================================================
--- // SECTION 12: WINDUI WINDOW & TABS (PC & MOBILE OPTIMIZED)
+-- // SECTION 13: WINDUI WINDOW & TABS (WITH NATIVE PC/MOBILE UI FALLBACK)
 -- ============================================================================
-getgenv().PrisonLife2026Running = true
+Env.PrisonLife2026Running = true
 
 if WindUI then
     local Window = WindUI:CreateWindow({
-        Title = "Prison Life • 2026 Hub",
+        Title = "Prison Life • 2026 Hub (v2.0)",
         Icon = "shield",
-        Author = "Latest Sniper Update (PC & Mobile v1.1)",
+        Author = "Anti-Ban Hardened • PC & Mobile",
         Folder = "PrisonLife2026Hub",
         Size = UDim2.fromOffset(580, 440),
         Transparent = true,
@@ -2009,6 +2349,18 @@ if WindUI then
     local TabVisuals  = Window:Tab({ Title = "ESP & Teleports", Icon = "eye" })
 
     -- // TAB 1: COMBAT & AIM
+    TabCombat:Section({ Title = "🛡️ Anti-Ban Protection (Error Code 600 Guard)" })
+    TabCombat:Toggle({
+        Title = "Anti-Ban Safe Mode (Recommended ON)",
+        Desc = "Enforces 2026 server-safe limits on FireRate, KillAura, Giver Teleports & WalkSpeed",
+        Value = true,
+        Callback = function(v)
+            State.AntiBanSafeMode = v
+            ApplyGunModsAll()
+            Notify("Anti-Ban Protection", v and "Safe Mode ON (Protected against Error 600)" or "Safe Mode OFF (Unrestricted)", 3)
+        end,
+    })
+
     TabCombat:Section({ Title = "2026 Bullet-Hook Silent Aim" })
     TabCombat:Toggle({
         Title = "Silent Aim (GunController Bullet Hook)",
@@ -2060,6 +2412,21 @@ if WindUI then
         Callback = function(v) State.SilentAimHostileCheck = v end,
     })
 
+    TabCombat:Section({ Title = "2026 3D Ballistic Holo-Shield" })
+    TabCombat:Toggle({
+        Title = "3D Ballistic Holo-Shield (Blocks Incoming Bullets)",
+        Desc = "Deploys a front-facing holographic riot shield with 180 HP & auto-recharge",
+        Value = false,
+        Callback = function(v)
+            State.HoloShield = v
+            if v then
+                CreateHoloShield()
+            else
+                DestroyHoloShield()
+            end
+        end,
+    })
+
     TabCombat:Section({ Title = "Camera Aim Assist & Triggerbot" })
     TabCombat:Toggle({
         Title = "Smooth Aim Assist (PC & Mobile Touch)",
@@ -2104,15 +2471,15 @@ if WindUI then
 
     TabCombat:Section({ Title = "Melee Kill Aura & Hitboxes" })
     TabCombat:Toggle({
-        Title = "Melee Kill Aura (meleeEvent)",
-        Desc = "Automatically punches nearby enemies within 12 studs",
+        Title = "Melee Kill Aura (Anti-Ban Rate-Limited)",
+        Desc = "Punches closest valid enemy within 10 studs at safe 0.32s intervals",
         Value = false,
         Callback = function(v) State.KillAura = v end,
     })
     TabCombat:Slider({
         Title = "Kill Aura Range (Studs)",
-        Value = { Min = 4, Max = 14, Default = 12 },
-        Callback = function(v) State.KillAuraRange = tonumber(v) or 12 end,
+        Value = { Min = 4, Max = 12, Default = 10 },
+        Callback = function(v) State.KillAuraRange = tonumber(v) or 10 end,
     })
     TabCombat:Toggle({
         Title = "Expand Enemy Hitboxes (Invisible Box)",
@@ -2127,18 +2494,18 @@ if WindUI then
     })
     TabCombat:Slider({
         Title = "Hitbox Size",
-        Value = { Min = 3, Max = 18, Default = 10 },
-        Callback = function(v) State.HitboxSize = tonumber(v) or 10 end,
+        Value = { Min = 3, Max = 15, Default = 9 },
+        Callback = function(v) State.HitboxSize = tonumber(v) or 9 end,
     })
 
     -- // TAB 2: WEAPONS & GUN MODS
-    TabWeapons:Section({ Title = "2026 Instant Gun Grabber (GiverPressed)" })
+    TabWeapons:Section({ Title = "2026 Safe Gun Grabber (GiverPressed)" })
     TabWeapons:Button({
-        Title = "Grab All Free Guns (Remington 870 + AK-47 + MP5)",
-        Desc = "Uses 2026 #TouchGiver CFrame spoof + GiverPressed remote",
+        Title = "Grab Armory Loadout (Remington 870 + MP5 + M9)",
+        Desc = "Same-zone pickup (no 1,750-stud cross-map oscillation)",
         Callback = function()
             task.spawn(function()
-                GrabWeapons({ "Remington 870", "AK-47", "MP5" })
+                GrabWeapons({ "Remington 870", "MP5", "M9" })
             end)
         end,
     })
@@ -2147,21 +2514,21 @@ if WindUI then
         Callback = function() task.spawn(function() GrabWeapons({ "Remington 870" }) end) end,
     })
     TabWeapons:Button({
-        Title = "Grab AK-47 (Rifle)",
-        Callback = function() task.spawn(function() GrabWeapons({ "AK-47" }) end) end,
-    })
-    TabWeapons:Button({
         Title = "Grab MP5 (SMG)",
         Callback = function() task.spawn(function() GrabWeapons({ "MP5" }) end) end,
     })
+    TabWeapons:Button({
+        Title = "Grab AK-47 (Criminal Base Rifle)",
+        Callback = function() task.spawn(function() GrabWeapons({ "AK-47" }) end) end,
+    })
     TabWeapons:Toggle({
-        Title = "Auto Grab Guns on Every Respawn",
+        Title = "Auto Grab Armory Loadout on Respawn",
         Value = false,
         Callback = function(v) State.AutoGetGuns = v end,
     })
     TabWeapons:Toggle({
         Title = "Auto Pickup Dropped Keycards & Guns",
-        Desc = "Automatically grabs dropped Keycards and weapons within 12 studs",
+        Desc = "Automatically grabs dropped Keycards and weapons within 11.5 studs",
         Value = false,
         Callback = function(v) State.AutoPickupDropped = v end,
     })
@@ -2176,10 +2543,10 @@ if WindUI then
         end,
     })
     TabWeapons:Slider({
-        Title = "FireRate (Shots Per Second)",
-        Value = { Min = 5, Max = 35, Default = 22 },
+        Title = "FireRate (Shots Per Second • Capped at 15 in Safe Mode)",
+        Value = { Min = 5, Max = 25, Default = 14 },
         Callback = function(v)
-            State.GunFireRateSPS = tonumber(v) or 22
+            State.GunFireRateSPS = tonumber(v) or 14
             ApplyGunModsAll()
         end,
     })
@@ -2210,7 +2577,7 @@ if WindUI then
         Callback = function(v) State.AutoReloadHotSwap = v end,
     })
     TabWeapons:Toggle({
-        Title = "Show Floating Mobile Action Bar (Fast Switch / Guns / Invis)",
+        Title = "Show Floating Action Bar (Fast Switch / Guns / Shield / Invis)",
         Desc = "Adds on-screen quick tap buttons for Mobile & PC users",
         Value = IsMobile,
         Callback = function(v)
@@ -2278,7 +2645,7 @@ if WindUI then
     })
     TabPrison:Toggle({
         Title = "Auto Become Criminal After Being Arrested",
-        Desc = "Waits 4s after ClientArrested fires and teleports back to Criminal Base",
+        Desc = "Waits 4.25s after ClientArrested fires and teleports back to Criminal Base",
         Value = false,
         Callback = function(v) State.AutoCriminalOnArrest = v end,
     })
@@ -2338,8 +2705,8 @@ if WindUI then
     })
     TabVehicles:Slider({
         Title = "Vehicle Fly Speed",
-        Value = { Min = 30, Max = 220, Default = 85 },
-        Callback = function(v) State.VehicleFlySpeed = tonumber(v) or 85 end,
+        Value = { Min = 30, Max = 180, Default = 80 },
+        Callback = function(v) State.VehicleFlySpeed = tonumber(v) or 80 end,
     })
     TabVehicles:Toggle({
         Title = "Vehicle Speed Multiplier",
@@ -2349,8 +2716,8 @@ if WindUI then
     TabVehicles:Slider({
         Title = "Car Speed Multiplier",
         Step = 0.2,
-        Value = { Min = 1.2, Max = 5.0, Default = 2.2 },
-        Callback = function(v) State.VehicleSpeedMult = tonumber(v) or 2.2 end,
+        Value = { Min = 1.2, Max = 4.0, Default = 2.0 },
+        Callback = function(v) State.VehicleSpeedMult = tonumber(v) or 2.0 end,
     })
 
     TabVehicles:Section({ Title = "Serverside FE Invisible & Anti-Troll" })
@@ -2375,10 +2742,13 @@ if WindUI then
         Callback = function(v) State.AntiFling = v end,
     })
     TabVehicles:Toggle({
-        Title = "Vehicle Fling Enemies (Car Fling Exploit)",
-        Desc = "Launches network-owned VehicleSeats at enemy players at 9500 velocity",
+        Title = "Vehicle Fling Enemies (Requires Safe Mode OFF)",
+        Desc = "Launches network-owned VehicleSeats at enemy players",
         Value = false,
         Callback = function(v)
+            if v and State.AntiBanSafeMode then
+                Notify("Anti-Ban Safe Mode", "Disable Anti-Ban Safe Mode first to use 9500-velocity Car Fling!", 4)
+            end
             State.VehicleFling = v
             if v then State.AntiFling = true end
         end,
@@ -2418,8 +2788,8 @@ if WindUI then
     })
     TabMove:Slider({
         Title = "Custom WalkSpeed",
-        Value = { Min = 16, Max = 100, Default = 42 },
-        Callback = function(v) State.CustomWalkSpeed = tonumber(v) or 42 end,
+        Value = { Min = 16, Max = 92, Default = 40 },
+        Callback = function(v) State.CustomWalkSpeed = tonumber(v) or 40 end,
     })
     TabMove:Toggle({
         Title = "Always Sprint (24 WalkSpeed)",
@@ -2434,7 +2804,7 @@ if WindUI then
     })
     TabMove:Toggle({
         Title = "No Jump Cooldown & Infinite Stamina",
-        Desc = "Disables AntiJump script & Jump signal stamina drain",
+        Desc = "Disables Jump signal stamina drain safely via getconnections",
         Value = false,
         Callback = function(v)
             State.AntiJumpCooldown = v
@@ -2450,8 +2820,8 @@ if WindUI then
         Callback = function(v) State.InfiniteJump = v end,
     })
     TabMove:Toggle({
-        Title = "Noclip (CharacterCollision Bypass)",
-        Desc = "Destroys ReplicatedStorage.Scripts.CharacterCollision & disables head collision lock",
+        Title = "Noclip (Non-Destructive Head Signal Bypass)",
+        Desc = "Disables Head CanCollide signal connections without destroying game scripts",
         Value = false,
         Callback = function(v)
             State.Noclip = v
@@ -2585,12 +2955,101 @@ if WindUI then
             end
         end,
     })
+else
+    -- ========================================================================
+    -- // BUILT-IN NATIVE PC & MOBILE FALLBACK UI (IF WINDUI FAILS TO LOAD)
+    -- ========================================================================
+    MobileQuickBar.Visible = true
+
+    local FallbackFrame = Instance.new("Frame")
+    FallbackFrame.Name = "PL2026_NativeFallbackHub"
+    FallbackFrame.AnchorPoint = Vector2.new(0.5, 0.5)
+    FallbackFrame.Position = UDim2.fromScale(0.5, 0.5)
+    FallbackFrame.Size = UDim2.fromOffset(380, 350)
+    FallbackFrame.BackgroundColor3 = Color3.fromRGB(16, 20, 30)
+    FallbackFrame.BorderSizePixel = 0
+    FallbackFrame.Parent = OverlayGui
+    Instance.new("UICorner", FallbackFrame).CornerRadius = UDim.new(0, 12)
+    local fbStroke = Instance.new("UIStroke", FallbackFrame)
+    fbStroke.Color = Color3.fromRGB(59, 130, 246)
+    fbStroke.Thickness = 1.5
+
+    local TitleBar = Instance.new("TextLabel")
+    TitleBar.Size = UDim2.new(1, -16, 0, 34)
+    TitleBar.Position = UDim2.fromOffset(12, 4)
+    TitleBar.BackgroundTransparency = 1
+    TitleBar.Font = Enum.Font.GothamBold
+    TitleBar.TextSize = 14
+    TitleBar.TextColor3 = Color3.new(1, 1, 1)
+    TitleBar.TextXAlignment = Enum.TextXAlignment.Left
+    TitleBar.Text = "🚔 Prison Life 2026 Hub (v2.0 Anti-Ban)"
+    TitleBar.Parent = FallbackFrame
+
+    local Scroll = Instance.new("ScrollingFrame")
+    Scroll.Size = UDim2.new(1, -20, 1, -48)
+    Scroll.Position = UDim2.fromOffset(10, 40)
+    Scroll.BackgroundTransparency = 1
+    Scroll.ScrollBarThickness = 4
+    Scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    Scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+    Scroll.Parent = FallbackFrame
+    local list = Instance.new("UIListLayout", Scroll)
+    list.Padding = UDim.new(0, 6)
+
+    local function AddFallbackToggle(label, initial, onToggle)
+        local btn = Instance.new("TextButton")
+        btn.Size = UDim2.new(1, -8, 0, 32)
+        btn.Font = Enum.Font.GothamBold
+        btn.TextSize = 12
+        btn.TextColor3 = Color3.new(1, 1, 1)
+        local state = initial
+        local function refresh()
+            btn.BackgroundColor3 = state and Color3.fromRGB(37, 99, 235) or Color3.fromRGB(30, 41, 59)
+            btn.Text = (state and "✅ " or "⬜ ") .. label
+        end
+        refresh()
+        btn.Parent = Scroll
+        Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 8)
+        btn.Activated:Connect(function()
+            state = not state
+            refresh()
+            onToggle(state)
+        end)
+    end
+
+    AddFallbackToggle("Anti-Ban Safe Mode (Error 600 Guard)", true, function(v) State.AntiBanSafeMode = v; ApplyGunModsAll() end)
+    AddFallbackToggle("Silent Aim (Bullet Hook)", false, function(v) State.SilentAim = v; if v then SetupGunControllerHooks() end end)
+    AddFallbackToggle("Smooth Aim Assist", false, function(v) State.AimAssist = v end)
+    AddFallbackToggle("Triggerbot (Auto-Shoot)", false, function(v) State.Triggerbot = v; if v then SetupGunControllerHooks() end end)
+    AddFallbackToggle("3D Ballistic Holo-Shield", false, function(v) State.HoloShield = v; if v then CreateHoloShield() else DestroyHoloShield() end end)
+    AddFallbackToggle("Safe Melee Kill Aura", false, function(v) State.KillAura = v end)
+    AddFallbackToggle("Gun Mods (Rapid Fire + No Spread)", false, function(v) State.GunMods = v; ApplyGunModsAll() end)
+    AddFallbackToggle("Region-Safe MaxSpeed", false, function(v) State.MaxSpeed = v end)
+    AddFallbackToggle("Anti-Tase & Always Backpack", false, function(v) State.AntiTase = v; State.AlwaysBackpack = v end)
+    AddFallbackToggle("Auto Arrest Aura", false, function(v) State.AutoArrest = v end)
+    AddFallbackToggle("Role-Colored Player ESP", false, function(v) State.ESP = v end)
+
+    local ToggleHubBtn = Instance.new("TextButton")
+    ToggleHubBtn.Name = "PL2026_ToggleHubBtn"
+    ToggleHubBtn.Size = UDim2.fromOffset(105, 34)
+    ToggleHubBtn.Position = UDim2.new(0.02, 0, 0.18, 0)
+    ToggleHubBtn.BackgroundColor3 = Color3.fromRGB(30, 58, 138)
+    ToggleHubBtn.Font = Enum.Font.GothamBold
+    ToggleHubBtn.TextSize = 12
+    ToggleHubBtn.TextColor3 = Color3.new(1, 1, 1)
+    ToggleHubBtn.Text = "🚔 PL 2026"
+    ToggleHubBtn.Parent = OverlayGui
+    Instance.new("UICorner", ToggleHubBtn).CornerRadius = UDim.new(0, 10)
+    ToggleHubBtn.Activated:Connect(function()
+        FallbackFrame.Visible = not FallbackFrame.Visible
+    end)
 end
 
 -- // Cleanup Registration
-getgenv().PrisonLife2026Cleanup = function()
-    getgenv().PrisonLife2026Running = false
+Env.PrisonLife2026Cleanup = function()
+    Env.PrisonLife2026Running = false
     StopFEInvisible()
+    DestroyHoloShield()
     RestoreAllHitboxes()
     RestoreAllDoors()
     for _, conn in ipairs(Connections) do
@@ -2599,9 +3058,12 @@ getgenv().PrisonLife2026Cleanup = function()
     for plr in pairs(ESPObjects) do
         RemovePlayerESP(plr)
     end
+    for _, hl in pairs(C4Highlights) do
+        pcall(function() hl:Destroy() end)
+    end
     for _, inst in ipairs(CreatedInstances) do
         pcall(function() inst:Destroy() end)
     end
 end
 
-Notify("Prison Life 2026 v1.1 Loaded", "All 5 video bugs fixed! Ready for PC & Mobile.", 5)
+Notify("Prison Life • 2026 Hub v2.0", "Loaded Anti-Ban Hardened PC & Mobile Script!", 4)

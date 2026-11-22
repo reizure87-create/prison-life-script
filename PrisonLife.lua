@@ -1,9 +1,9 @@
 --[[
     ================================================================================
-    🚔 PRISON LIFE — ULTIMATE 2026 SCRIPT (PC & MOBILE) [v4.0 CLEAN KX PRO EDITION]
+    🚔 PRISON LIFE — ULTIMATE 2026 SCRIPT (PC & MOBILE) [v5.0 ARCHITECT KX PRO]
     ================================================================================
     Target Game : Prison Life (PlaceId: 155615604 | UniverseId: 73885730)
-    Patch Target: Late 2026 ("Sniper Update!" Remotes, Attributes & Anti-Cheat)
+    Patch Target: Late 2026 ("Sniper Update!" — M700, Revolver, Light Vest, Remotes)
     Platform    : PC (Keyboard/Mouse + Hotkeys) & Mobile (Clean Clutter-Free HUD)
     UI Library  : Clean 7-Tab WindUI (with Built-In Native Touch/PC UI Fallback)
 
@@ -183,6 +183,8 @@ local State = {
 
     -- AutoHvH, Ragebot & .combo1 Burst
     AutoHvH = false,
+    HvHTargetExploitersFirst = true,
+    AutoHvHReactiveEvade = true,
     Ragebot = false,
     Ragebot360 = true,
     RagebotAutoSwitch = true,
@@ -251,6 +253,7 @@ local State = {
     GunNoSpread = true,
     GunFullAuto = true,
     GunInfiniteRange = true,
+    GunZeroChargeTime = true,
 
     AutoHeal = false,
     AutoHealThreshold = 80,
@@ -303,6 +306,8 @@ local State = {
     -- Visuals, VFX, Audio, Mini-Killfeed & Alerts
     ESP = false,
     ESPHighlight = true,
+    ESPHighlightMax = 30,
+    ESPDetailDistance = 140,
     ESPNameTag = true,
     ESPHealth = true,
     ESPDistance = true,
@@ -323,9 +328,10 @@ local State = {
     CheaterAlerts = true,
     CarTPAlerts = true,
 
-    -- KX Command Pill & Chat Commands
+    -- KX Command Pill, Chat Commands & Profile Persistence
     ShowCommandPill = true,
     ChatCommands = true,
+    ConfigAutoLoad = true,
 }
 
 -- // Load WindUI
@@ -357,14 +363,97 @@ local function Notify(title, content, duration)
 end
 
 -- ============================================================================
--- // SECTION 1: TARGET VALIDATION (FIXED GUARD HOSTILE CHECK) & WALLBANG SCANNER
+-- // SECTION 1: CORE ARCHITECT NAMESPACE, WORLD CACHE & TARGET VALIDATION
 -- ============================================================================
+local App = {
+    Scheduler = {
+        Players = {},
+        PlayersUpdated = 0,
+        Paused = false,
+    },
+    WorldCache = {
+        Cars = setmetatable({}, { __mode = "k" }),      -- [Model] = { drv, pass, nonWheels, wheels }
+        Doors = {},                                     -- array of BaseParts in Workspace.Doors
+        DoorSet = setmetatable({}, { __mode = "k" }),
+        Fences = {},                                    -- array of TouchTransmitter BaseParts in Prison_Fences
+        FenceSet = setmetatable({}, { __mode = "k" }),
+        Dropped = setmetatable({}, { __mode = "k" }),   -- [Model] = true for dropped Tools
+        Players = setmetatable({}, { __mode = "k" }),   -- [Player] = { char, hrp, hum, head, animator, riotShield, tool, graceUntil }
+        GiversByName = {},                              -- [lowerToolName] = { giver, ... }
+        GiversAll = {},
+        GiverBuiltAt = 0,
+        CarContainer = nil,
+        DoorsFolder = nil,
+        VFXPoolFolder = nil,
+        ShieldModel = nil,
+    },
+    ToolArbiter = {
+        Owner = nil,
+        Priority = 0,
+        Until = 0,
+    },
+    Anomaly = {
+        Flagged = {},       -- [UserId] = expiresAt
+        StrikeInfo = {},    -- [UserId] = { count, streak, lastAlert, lastStrike }
+        GraceUntil = {},    -- [UserId] = os.clock() + graceSec
+        LastAttackers = {}, -- [Player] = os.clock()
+    },
+    Persistence = {},
+}
+
+function App.ToolArbiter.Acquire(owner, priority, duration)
+    local now = os.clock()
+    if App.ToolArbiter.Owner ~= owner and now < App.ToolArbiter.Until and priority < App.ToolArbiter.Priority then
+        return false
+    end
+    App.ToolArbiter.Owner = owner
+    App.ToolArbiter.Priority = priority
+    App.ToolArbiter.Until = now + (duration or 0.18)
+    return true
+end
+
+function App.ToolArbiter.Release(owner)
+    if App.ToolArbiter.Owner == owner then
+        App.ToolArbiter.Owner = nil
+        App.ToolArbiter.Priority = 0
+        App.ToolArbiter.Until = 0
+    end
+end
+
+function App.ToolArbiter.CanUse(owner, priority)
+    local now = os.clock()
+    if App.ToolArbiter.Owner == owner or now >= App.ToolArbiter.Until then
+        return true
+    end
+    return priority > App.ToolArbiter.Priority
+end
+
+function App.GetCachedPlayerInfo(plr)
+    return plr and App.WorldCache.Players[plr] or nil
+end
+
+function App.IsPlayerExploiterThreat(plr)
+    if not plr then return false end
+    local now = os.clock()
+    if (App.Anomaly.Flagged[plr.UserId] or 0) > now then return true end
+    local info = App.WorldCache.Players[plr]
+    local hrp = info and info.hrp
+    if hrp and hrp.Parent then
+        if hrp.AssemblyAngularVelocity.Magnitude > 55 then return true end
+        if hrp.Position.Y < 86 and hrp.Position.Y > -30 then return true end
+    end
+    return false
+end
+
 local function GetCharacter(plr)
+    local info = App.WorldCache.Players[plr]
+    if info and info.char and info.char.Parent then return info.char end
     return plr and plr.Character
 end
 
 local function GetRoot(char)
-    return char and (char:FindFirstChild("HumanoidRootPart") or char:FindFirstChild("Torso") or char:FindFirstChild("UpperTorso"))
+    if not char then return nil end
+    return char:FindFirstChild("HumanoidRootPart") or char:FindFirstChild("Torso") or char:FindFirstChild("UpperTorso")
 end
 
 local function GetHumanoid(char)
@@ -381,10 +470,10 @@ end
 
 local function HasTargetArmor(char)
     if not char then return false end
-    if char:FindFirstChild("Light Vest") or char:FindFirstChild("Armor") or char:FindFirstChild("Vest") then
+    if (tonumber(char:GetAttribute("Armor")) or 0) > 0 or (tonumber(char:GetAttribute("VestHealth")) or 0) > 0 then
         return true
     end
-    if (tonumber(char:GetAttribute("Armor")) or 0) > 0 or (tonumber(char:GetAttribute("VestHealth")) or 0) > 0 then
+    if char:FindFirstChild("Light Vest") or char:FindFirstChild("Armor") or char:FindFirstChild("Vest") then
         return true
     end
     return false
@@ -410,7 +499,7 @@ local function PickAimPart(char, forceHeadOverride)
     return char:FindFirstChild("Torso") or char:FindFirstChild("UpperTorso") or GetRoot(char) or char:FindFirstChild("Head")
 end
 
--- CRITICAL FIX FROM VIDEO:
+-- CRITICAL FIX:
 -- Lethal weapons (forArrest == false) on Guards MUST ONLY shoot Inmates with `Hostile == true`!
 -- Shooting a Trespassing-only inmate triggers "Do not kill innocent people!" and kicks you off Guards!
 -- Non-lethal arrest/taze (forArrest == true) allows Criminals + Hostile/Trespassing/Tased Inmates.
@@ -419,10 +508,11 @@ local function IsValidCombatTarget(plr, requireHostileForGuard, whitelistTbl, fo
     if whitelistTbl and whitelistTbl[plr.UserId] then return false end
     if not plr.Team or plr.Team == Teams:FindFirstChild("Neutral") then return false end
 
-    local char = plr.Character
+    local info = App.WorldCache.Players[plr]
+    local char = (info and info.char and info.char.Parent and info.char) or plr.Character
     if not char or char:FindFirstChildOfClass("ForceField") then return false end
 
-    local hum = GetHumanoid(char)
+    local hum = (info and info.hum and info.hum.Parent == char and info.hum) or GetHumanoid(char)
     if not hum or hum.Health <= 0 or hum:GetState() == Enum.HumanoidStateType.Dead then return false end
 
     if State.SilentAimSkipDowned and (char:GetAttribute("Downed") or char:GetAttribute("Arrested")) then
@@ -452,17 +542,18 @@ pcall(function() WallRayParams.CollisionGroup = "ClientBullet" end)
 
 local function BuildRayIgnoreList(targetChar)
     local ignore = { LocalPlayer.Character, targetChar, Camera }
-    if (State.VehicleWallbang or State.SilentAimWallbang) and Workspace:FindFirstChild("CarContainer") then
-        table.insert(ignore, Workspace.CarContainer)
+    local wc = App.WorldCache
+    if (State.VehicleWallbang or State.SilentAimWallbang) and wc.CarContainer and wc.CarContainer.Parent then
+        table.insert(ignore, wc.CarContainer)
     end
-    if State.OpenAllDoors and Workspace:FindFirstChild("Doors") then
-        table.insert(ignore, Workspace.Doors)
+    if State.OpenAllDoors and wc.DoorsFolder and wc.DoorsFolder.Parent then
+        table.insert(ignore, wc.DoorsFolder)
     end
-    if Workspace:FindFirstChild("PL2026_VFXPool") then
-        table.insert(ignore, Workspace.PL2026_VFXPool)
+    if wc.VFXPoolFolder then
+        table.insert(ignore, wc.VFXPoolFolder)
     end
-    if Workspace:FindFirstChild("PL2026_BallisticShield") then
-        table.insert(ignore, Workspace.PL2026_BallisticShield)
+    if wc.ShieldModel and wc.ShieldModel.Parent then
+        table.insert(ignore, wc.ShieldModel)
     end
     return ignore
 end
@@ -536,6 +627,7 @@ local function GetBestCombatTarget(opts)
     local forceHead = (opts.forceHead == true)
     local maxRange = tonumber(opts.range) or 1500
     local prioritizeArmed = (opts.prioritizeArmed == true or State.AutoHvH)
+    local now = os.clock()
 
     local screenCenter = Vector2.new(Camera.ViewportSize.X * 0.5, Camera.ViewportSize.Y * 0.5)
     if not IsMobile and UserInputService.MouseBehavior ~= Enum.MouseBehavior.LockCenter then
@@ -543,11 +635,18 @@ local function GetBestCombatTarget(opts)
         screenCenter = Vector2.new(mPos.X, mPos.Y)
     end
 
+    local snapshot = App.Scheduler.Players
+    if #snapshot == 0 then
+        snapshot = Players:GetPlayers()
+        App.Scheduler.Players = snapshot
+    end
+
     local candidates = {}
-    for _, plr in ipairs(Players:GetPlayers()) do
+    for _, plr in ipairs(snapshot) do
         if IsValidCombatTarget(plr, requireHostile, State.KillAuraWhitelist, false) then
-            local char = plr.Character
-            local part = PickAimPart(char, forceHead)
+            local info = App.WorldCache.Players[plr]
+            local char = (info and info.char) or plr.Character
+            local part = (forceHead and info and info.head and info.head.Parent == char and info.head) or PickAimPart(char, forceHead)
             if part then
                 local worldDist = (part.Position - baseOrigin).Magnitude
                 if worldDist <= maxRange then
@@ -563,11 +662,17 @@ local function GetBestCombatTarget(opts)
                         end
                     end
                     if validScreen then
-                        -- In AutoHvH mode, strongly prioritize enemies holding firearms or shooting at you
+                        -- In AutoHvH mode, strongly prioritize cheaters/exploiters, recent shooters & armed threats!
                         if prioritizeArmed then
-                            local eq = char:FindFirstChildOfClass("Tool")
+                            local eq = (info and info.tool and info.tool.Parent == char and info.tool) or char:FindFirstChildOfClass("Tool")
                             if eq and (eq:GetAttribute("FireRate") or eq:GetAttribute("ToolType") == "Gun") then
                                 score = score * 0.45
+                            end
+                            if (App.Anomaly.LastAttackers[plr] or 0) > (now - 4.0) then
+                                score = score * 0.35
+                            end
+                            if State.HvHTargetExploitersFirst and App.IsPlayerExploiterThreat(plr) then
+                                score = score * 0.22
                             end
                         end
                         table.insert(candidates, { plr = plr, char = char, part = part, score = score })
@@ -690,22 +795,22 @@ AimAssistFOVStroke.Color = Color3.fromRGB(80, 180, 255)
 AimAssistFOVStroke.Thickness = 1.3
 AimAssistFOVStroke.Transparency = 0.4
 
--- Clean Bottom-Center Status Strip (Above Hotbar — NEVER covers your character!)
+-- Clean Bottom-Center Status Strip (Above Hotbar — NEVER covers your character or mobile hotbar!)
 local BottomStatusStrip = Instance.new("Frame")
 BottomStatusStrip.Name = "PL2026_BottomStrip"
 BottomStatusStrip.AnchorPoint = Vector2.new(0.5, 1)
-BottomStatusStrip.Position = UDim2.new(0.5, 0, 1, -78)
-BottomStatusStrip.Size = UDim2.fromOffset(320, 44)
+BottomStatusStrip.Position = UDim2.new(0.5, 0, 1, IsMobile and -88 or -78)
+BottomStatusStrip.Size = UDim2.fromOffset(300, 40)
 BottomStatusStrip.BackgroundTransparency = 1
 BottomStatusStrip.Parent = OverlayGui
 local StripLayout = Instance.new("UIListLayout", BottomStatusStrip)
-StripLayout.Padding = UDim.new(0, 4)
+StripLayout.Padding = UDim.new(0, 3)
 StripLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
 StripLayout.VerticalAlignment = Enum.VerticalAlignment.Bottom
 
 local ShieldBarHolder = Instance.new("Frame")
 ShieldBarHolder.Name = "HoloShieldBar"
-ShieldBarHolder.Size = UDim2.fromOffset(185, 18)
+ShieldBarHolder.Size = UDim2.fromOffset(174, 16)
 ShieldBarHolder.BackgroundColor3 = Color3.fromRGB(12, 18, 28)
 ShieldBarHolder.BackgroundTransparency = 0.25
 ShieldBarHolder.BorderSizePixel = 0
@@ -725,7 +830,7 @@ local ShieldBarText = Instance.new("TextLabel")
 ShieldBarText.Size = UDim2.fromScale(1, 1)
 ShieldBarText.BackgroundTransparency = 1
 ShieldBarText.Font = Enum.Font.GothamBold
-ShieldBarText.TextSize = 11
+ShieldBarText.TextSize = 10
 ShieldBarText.TextColor3 = Color3.new(1, 1, 1)
 ShieldBarText.TextStrokeTransparency = 0.25
 ShieldBarText.Text = "🛡️ SHIELD: 180/180"
@@ -874,32 +979,117 @@ local function TriggerHitmarkerVFX(isHeadshot, isKill)
     end)
 end
 
+local VFXPools = {
+    Tracers = {},
+    TracerIdx = 0,
+    TracerCount = 32,
+    Damages = {},
+    DamageIdx = 0,
+    DamageCount = 14,
+    Sparks = {},
+    SparkIdx = 0,
+    SparkCount = 10,
+}
+
+do
+    local parkedCF = CFrame.new(0, -9000, 0)
+    for i = 1, VFXPools.TracerCount do
+        local p = Instance.new("Part")
+        p.Name = "PL2026_Tracer"
+        p.Anchored = true
+        p.CanCollide = false
+        p.CanQuery = false
+        p.CanTouch = false
+        p.CastShadow = false
+        p.Material = Enum.Material.Neon
+        p.Size = Vector3.new(0.08, 0.08, 1)
+        p.Transparency = 1
+        p.CFrame = parkedCF
+        p.Parent = VFXPool
+        VFXPools.Tracers[i] = { part = p, gen = 0, tween = nil }
+    end
+
+    for i = 1, VFXPools.DamageCount do
+        local anchor = Instance.new("Part")
+        anchor.Name = "PL2026_DmgAnchor"
+        anchor.Anchored = true
+        anchor.CanCollide = false
+        anchor.CanQuery = false
+        anchor.CanTouch = false
+        anchor.CastShadow = false
+        anchor.Transparency = 1
+        anchor.Size = Vector3.new(0.2, 0.2, 0.2)
+        anchor.CFrame = parkedCF
+        anchor.Parent = VFXPool
+
+        local bb = Instance.new("BillboardGui")
+        bb.Size = UDim2.fromOffset(76, 26)
+        bb.AlwaysOnTop = true
+        bb.Enabled = false
+        bb.Adornee = anchor
+        bb.Parent = anchor
+
+        local lbl = Instance.new("TextLabel")
+        lbl.Size = UDim2.fromScale(1, 1)
+        lbl.BackgroundTransparency = 1
+        lbl.Font = Enum.Font.GothamBold
+        lbl.TextStrokeTransparency = 0.15
+        lbl.Text = ""
+        lbl.Parent = bb
+
+        VFXPools.Damages[i] = { part = anchor, bb = bb, lbl = lbl, gen = 0, tween = nil }
+    end
+
+    for i = 1, VFXPools.SparkCount do
+        local p = Instance.new("Part")
+        p.Name = "PL2026_ShieldSpark"
+        p.Shape = Enum.PartType.Ball
+        p.Anchored = true
+        p.CanCollide = false
+        p.CanQuery = false
+        p.CanTouch = false
+        p.CastShadow = false
+        p.Material = Enum.Material.Neon
+        p.Color = Color3.fromRGB(255, 230, 80)
+        p.Size = Vector3.new(0.45, 0.45, 0.45)
+        p.Transparency = 1
+        p.CFrame = parkedCF
+        p.Parent = VFXPool
+        VFXPools.Sparks[i] = { part = p, gen = 0, tween = nil }
+    end
+end
+
 local function SpawnBulletTracer(origin, hitPos, isRage)
     if not State.BulletTracers or typeof(origin) ~= "Vector3" or typeof(hitPos) ~= "Vector3" then return end
     local dist = (hitPos - origin).Magnitude
     if dist < 0.5 or dist > 4000 then return end
 
-    local p = Instance.new("Part")
-    p.Name = "PL2026_Tracer"
-    p.Anchored = true
-    p.CanCollide = false
-    p.CanQuery = false
-    p.CanTouch = false
-    p.CastShadow = false
-    p.Material = Enum.Material.Neon
+    VFXPools.TracerIdx = (VFXPools.TracerIdx % VFXPools.TracerCount) + 1
+    local slot = VFXPools.Tracers[VFXPools.TracerIdx]
+    local p = slot.part
+    if not p or not p.Parent then return end
+
+    slot.gen = slot.gen + 1
+    local token = slot.gen
+    if slot.tween then pcall(function() slot.tween:Cancel() end) end
+
     p.Color = isRage and Color3.fromRGB(255, 55, 85) or Color3.fromRGB(0, 225, 255)
     p.Transparency = 0.15
     p.Size = Vector3.new(0.08, 0.08, dist)
     p.CFrame = CFrame.lookAt(origin, hitPos) * CFrame.new(0, 0, -dist * 0.5)
-    p.Parent = VFXPool
 
     local fade = clamp(tonumber(State.TracerFadeTime) or 0.22, 0.08, 0.6)
-    TweenService:Create(p, TweenInfo.new(fade, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+    local tw = TweenService:Create(p, TweenInfo.new(fade, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
         Transparency = 1,
         Size = Vector3.new(0.015, 0.015, dist),
-    }):Play()
+    })
+    slot.tween = tw
+    tw:Play()
     task.delay(fade + 0.05, function()
-        if p and p.Parent then p:Destroy() end
+        if slot.gen == token and p and p.Parent then
+            p.Transparency = 1
+            p.CFrame = CFrame.new(0, -9000, 0)
+        end
     end)
 end
 
@@ -908,60 +1098,63 @@ local function SpawnDamageNumber(worldPos, dmg, isHead)
     local amt = round(tonumber(dmg) or 0)
     if amt <= 0 then return end
 
-    local anchor = Instance.new("Part")
-    anchor.Anchored = true
-    anchor.CanCollide = false
-    anchor.CanQuery = false
-    anchor.CanTouch = false
-    anchor.Transparency = 1
-    anchor.Size = Vector3.new(0.2, 0.2, 0.2)
-    anchor.Position = worldPos + Vector3.new((math.random() - 0.5) * 1.1, 1.2, (math.random() - 0.5) * 1.1)
-    anchor.Parent = VFXPool
+    VFXPools.DamageIdx = (VFXPools.DamageIdx % VFXPools.DamageCount) + 1
+    local slot = VFXPools.Damages[VFXPools.DamageIdx]
+    local anchor = slot.part
+    if not anchor or not anchor.Parent then return end
 
-    local bb = Instance.new("BillboardGui")
-    bb.Size = UDim2.fromOffset(76, 26)
-    bb.AlwaysOnTop = true
-    bb.Adornee = anchor
-    bb.Parent = anchor
+    slot.gen = slot.gen + 1
+    local token = slot.gen
+    if slot.tween then pcall(function() slot.tween:Cancel() end) end
 
-    local lbl = Instance.new("TextLabel")
-    lbl.Size = UDim2.fromScale(1, 1)
-    lbl.BackgroundTransparency = 1
-    lbl.Font = Enum.Font.GothamBold
-    lbl.TextSize = isHead and 15 or 13
-    lbl.TextColor3 = isHead and Color3.fromRGB(255, 75, 75) or Color3.fromRGB(255, 235, 110)
-    lbl.TextStrokeTransparency = 0.15
-    lbl.Text = "-" .. tostring(amt) .. (isHead and " HS" or "")
-    lbl.Parent = bb
+    local startPos = worldPos + Vector3.new((math.random() - 0.5) * 1.1, 1.2, (math.random() - 0.5) * 1.1)
+    anchor.CFrame = CFrame.new(startPos)
+    slot.lbl.TextSize = isHead and 15 or 13
+    slot.lbl.TextColor3 = isHead and Color3.fromRGB(255, 75, 75) or Color3.fromRGB(255, 235, 110)
+    slot.lbl.Text = "-" .. tostring(amt) .. (isHead and " HS" or "")
+    slot.bb.Enabled = true
 
-    TweenService:Create(anchor, TweenInfo.new(0.5, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
-        Position = anchor.Position + Vector3.new(0, 2.4, 0),
-    }):Play()
+    local tw = TweenService:Create(anchor, TweenInfo.new(0.5, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+        Position = startPos + Vector3.new(0, 2.4, 0),
+    })
+    slot.tween = tw
+    tw:Play()
     task.delay(0.54, function()
-        if anchor and anchor.Parent then anchor:Destroy() end
+        if slot.gen == token and anchor and anchor.Parent then
+            slot.bb.Enabled = false
+            anchor.CFrame = CFrame.new(0, -9000, 0)
+        end
     end)
 end
 
 local function SpawnShieldSparkVFX(hitPos)
     if not State.ShieldHitVFX or typeof(hitPos) ~= "Vector3" then return end
     pcall(function() RicochetSound:Play() end)
-    local p = Instance.new("Part")
-    p.Anchored = true
-    p.CanCollide = false
-    p.CanQuery = false
-    p.CanTouch = false
-    p.Material = Enum.Material.Neon
-    p.Color = Color3.fromRGB(255, 230, 80)
+
+    VFXPools.SparkIdx = (VFXPools.SparkIdx % VFXPools.SparkCount) + 1
+    local slot = VFXPools.Sparks[VFXPools.SparkIdx]
+    local p = slot.part
+    if not p or not p.Parent then return end
+
+    slot.gen = slot.gen + 1
+    local token = slot.gen
+    if slot.tween then pcall(function() slot.tween:Cancel() end) end
+
     p.Size = Vector3.new(0.45, 0.45, 0.45)
-    p.Position = hitPos
     p.Transparency = 0.15
-    p.Parent = VFXPool
-    TweenService:Create(p, TweenInfo.new(0.16, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+    p.CFrame = CFrame.new(hitPos)
+
+    local tw = TweenService:Create(p, TweenInfo.new(0.16, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
         Size = Vector3.new(1.4, 1.4, 1.4),
         Transparency = 1,
-    }):Play()
+    })
+    slot.tween = tw
+    tw:Play()
     task.delay(0.18, function()
-        if p and p.Parent then p:Destroy() end
+        if slot.gen == token and p and p.Parent then
+            p.Transparency = 1
+            p.CFrame = CFrame.new(0, -9000, 0)
+        end
     end)
 end
 
@@ -1049,37 +1242,117 @@ local function SyncOriginOnStack(origStart, newOrigin)
     end
 end
 
+local function GetClosureConstantsSafe(fn)
+    local gc = (debug and debug.getconstants) or getconstants
+    if type(fn) ~= "function" or type(gc) ~= "function" then return nil end
+    local ok, list = pcall(gc, fn)
+    return (ok and type(list) == "table") and list or nil
+end
+
+local function ClosureHasConstant(consts, needle)
+    if type(consts) ~= "table" then return false end
+    for _, c in pairs(consts) do
+        if type(c) == "string" and c == needle then return true end
+    end
+    return false
+end
+
+local function InspectUpvaluesFromClosure(fn, visited, depth)
+    if type(fn) ~= "function" or depth > 3 then return end
+    visited = visited or {}
+    if visited[fn] then return end
+    visited[fn] = true
+
+    local consts = GetClosureConstantsSafe(fn)
+    local hasRaycastConst = ClosureHasConstant(consts, "Raycast") or ClosureHasConstant(consts, "canBeDamaged")
+    local hasReloadConst = ClosureHasConstant(consts, "Local_ReloadSession") or ClosureHasConstant(consts, "ReloadTime")
+    local hasShootConst = ClosureHasConstant(consts, "Local_IsShooting") or ClosureHasConstant(consts, "FireRate")
+
+    local foundRayParams = nil
+    for i = 1, 32 do
+        local ok, uv = pcall(debug.getupvalue, fn, i)
+        if not ok then break end
+        local tv = typeof(uv)
+        if tv == "RaycastParams" then
+            foundRayParams = uv
+            if not GunHook.ShootParams then GunHook.ShootParams = uv end
+        elseif tv == "table" and not GunHook.GunData then
+            if rawget(uv, "Range") ~= nil and rawget(uv, "FireRate") ~= nil then
+                GunHook.GunData = uv
+            end
+        elseif tv == "function" then
+            InspectUpvaluesFromClosure(uv, visited, depth + 1)
+        end
+    end
+
+    if (foundRayParams or hasRaycastConst) and not GunHook.Bullet then
+        -- Bullet function directly holds RaycastParams in its upvalues or invokes Raycast
+        if foundRayParams or (ClosureHasConstant(consts, "Raycast") and ClosureHasConstant(consts, "canBeDamaged")) then
+            GunHook.Bullet = fn
+        end
+    end
+    if hasReloadConst and fn ~= GunHook.Shoot and fn ~= GunHook.Bullet and not GunHook.Reload then
+        GunHook.Reload = fn
+    end
+    if hasShootConst and fn ~= GunHook.Bullet and not GunHook.Shoot then
+        GunHook.Shoot = fn
+    end
+end
+
 local function SetupGunControllerHooks()
-    if getconnections and debug and debug.getupvalue then
+    if debug and debug.getupvalue then
         pcall(function()
+            local visited = {}
             local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
             local home = pg and pg:FindFirstChild("Home")
             local hud = home and home:FindFirstChild("hud")
             local actionArea = hud and hud:FindFirstChild("ActionArea")
-            if actionArea then
-                for _, conn in ipairs(getconnections(actionArea.InputBegan)) do
-                    if conn.Function then
-                        local shootFn = debug.getupvalue(conn.Function, 2)
-                        if type(shootFn) == "function" then
-                            GunHook.Shoot = shootFn
-                            pcall(function() GunHook.Reload = debug.getupvalue(shootFn, 2) end)
-                            pcall(function() GunHook.Bullet = debug.getupvalue(shootFn, 16) end)
-                            GunHook.Ready = (GunHook.Shoot ~= nil and GunHook.Bullet ~= nil)
-                            break
+
+            -- 1. Primary: scan ActionArea input connections using dynamic type signatures
+            if getconnections and actionArea then
+                for _, sig in ipairs({ actionArea.InputBegan }) do
+                    for _, conn in ipairs(getconnections(sig)) do
+                        if type(conn.Function) == "function" then
+                            InspectUpvaluesFromClosure(conn.Function, visited, 1)
+                            -- Fallback positional hint if executor lacks getconstants
+                            if not GunHook.Shoot then
+                                local okS, maybeShoot = pcall(debug.getupvalue, conn.Function, 2)
+                                if okS and type(maybeShoot) == "function" then
+                                    InspectUpvaluesFromClosure(maybeShoot, visited, 1)
+                                    if not GunHook.Shoot then GunHook.Shoot = maybeShoot end
+                                end
+                            end
                         end
                     end
                 end
             end
 
-            for _, conn in ipairs(getconnections(LocalPlayer.CharacterAdded)) do
-                if conn.Function then
-                    local okS, src = pcall(debug.info, conn.Function, "s")
-                    if okS and type(src) == "string" and src:find("GunController") then
-                        pcall(function() GunHook.ShootParams = debug.getupvalue(conn.Function, 2) end)
-                        break
+            -- 2. Secondary: CharacterAdded connections belonging to GunController
+            if getconnections then
+                for _, conn in ipairs(getconnections(LocalPlayer.CharacterAdded)) do
+                    if type(conn.Function) == "function" then
+                        local okS, src = pcall(debug.info, conn.Function, "s")
+                        if okS and type(src) == "string" and src:find("GunController") then
+                            InspectUpvaluesFromClosure(conn.Function, visited, 1)
+                        end
                     end
                 end
             end
+
+            -- 3. Tertiary: getsenv / getgc GunController closure scan (resilient across patches!)
+            if not GunHook.Bullet and getgc then
+                for _, obj in ipairs(getgc(false)) do
+                    if type(obj) == "function" then
+                        local okS, src = pcall(debug.info, obj, "s")
+                        if okS and type(src) == "string" and src:find("GunController") then
+                            InspectUpvaluesFromClosure(obj, visited, 1)
+                            if GunHook.Bullet and GunHook.Shoot then break end
+                        end
+                    end
+                end
+            end
+
+            GunHook.Ready = (GunHook.Shoot ~= nil and GunHook.Bullet ~= nil)
 
             if GunHook.Bullet and hookfunction and not GunHook.IsHooked then
                 GunHook.IsHooked = true
@@ -1191,6 +1464,10 @@ local function FireToolAtTarget(tool, targetPart, isRage, isTase, isCombo)
     if not char or not hum or hum.Health <= 0 or not tool or not targetPart then return false end
     if FiringBusy then return false end
 
+    local ownerName = isCombo and "Combo1" or (isTase and "AutoTaze" or (isRage and "Ragebot" or "Triggerbot"))
+    local arbiterPrio = isCombo and 5 or (isRage and 4 or 3)
+    if not App.ToolArbiter.Acquire(ownerName, arbiterPrio, 0.16) then return false end
+
     if not GunHook.Shoot then SetupGunControllerHooks() end
 
     FiringBusy = true
@@ -1202,10 +1479,16 @@ local function FireToolAtTarget(tool, targetPart, isRage, isTase, isCombo)
         end
     end
     FiringBusy = false
-    if tool.Parent ~= char then return false end
+    if tool.Parent ~= char then
+        App.ToolArbiter.Release(ownerName)
+        return false
+    end
 
     local ammo = tool:GetAttribute("Local_CurrentAmmo") or tool:GetAttribute("CurrentAmmo") or 1
-    if ammo <= 0 or (tool:GetAttribute("Local_ReloadSession") or 0) > 0 then return false end
+    if ammo <= 0 or (tool:GetAttribute("Local_ReloadSession") or 0) > 0 then
+        App.ToolArbiter.Release(ownerName)
+        return false
+    end
 
     if isTase then
         GunHook.TaseTargetPart = targetPart
@@ -1233,11 +1516,14 @@ local function FireToolAtTarget(tool, targetPart, isRage, isTase, isCombo)
         pcall(function() tool:Activate() end)
     end
 
-    local holdTime = math.max(0.05, (tonumber(tool:GetAttribute("ChargeTime")) or 0) + 0.05)
+    local chargeAttr = tonumber(tool:GetAttribute("ChargeTime")) or 0
+    if State.GunMods and State.GunZeroChargeTime then chargeAttr = 0 end
+    local holdTime = math.max(0.05, chargeAttr + 0.05)
     task.delay(holdTime, function()
         GunHook.ForceRageShot = false
         GunHook.RageTargetPart = nil
         GunHook.TaseTargetPart = nil
+        App.ToolArbiter.Release(ownerName)
     end)
     return true
 end
@@ -1255,6 +1541,8 @@ local HoloShieldState = {
     DesyncActive = false,
     SavedCF = nil,
     JitterAngle = 0,
+    LastAttacker = nil,
+    LastAttackClock = 0,
 }
 
 local function HasEquippedRiotShield()
@@ -1270,6 +1558,7 @@ local function DestroyHoloShield()
     end
     HoloShieldState.DesyncActive = false
     HoloShieldState.SavedCF = nil
+    App.WorldCache.ShieldModel = nil
     if HoloShieldState.Model then
         pcall(function() HoloShieldState.Model:Destroy() end)
         HoloShieldState.Model = nil
@@ -1305,6 +1594,7 @@ local function CreateHoloShield()
     m.Parent = Workspace
     HoloShieldState.Model = m
     HoloShieldState.CorePart = core
+    App.WorldCache.ShieldModel = m
     HoloShieldState.MaxHP = State.HoloShieldMaxHP or 180
     HoloShieldState.HP = HoloShieldState.MaxHP
     ShieldBarHolder.Visible = true
@@ -1359,14 +1649,13 @@ end
 
 if Remotes.ReplicateEvent and Remotes.ReplicateEvent:IsA("RemoteEvent") then
     AddConnection(Remotes.ReplicateEvent.OnClientEvent:Connect(function(...)
-        if not State.HoloShield or IsOnTeamsMenu() then return end
+        if IsOnTeamsMenu() then return end
         local myHrp = GetRoot(LocalPlayer.Character)
         if not myHrp then return end
         local realPos = (HoloShieldState.DesyncActive and HoloShieldState.SavedCF and HoloShieldState.SavedCF.Position) or myHrp.Position
         local pts = ExtractPointsFromReplicatePayload(...)
         if #pts >= 2 then
             local origin, hitPos = pts[1], pts[2]
-            -- Only react to enemy bullets (origin > 6 studs away from us) passing near our shield
             if (origin - realPos).Magnitude > 6 then
                 local shieldPos = (HoloShieldState.CorePart and HoloShieldState.CorePart.Position) or realPos
                 local seg = hitPos - origin
@@ -1374,7 +1663,31 @@ if Remotes.ReplicateEvent and Remotes.ReplicateEvent:IsA("RemoteEvent") then
                 if len > 1 then
                     local t = clamp((shieldPos - origin):Dot(seg) / (len * len), 0, 1)
                     local closest = origin + (seg * t)
-                    if (closest - shieldPos).Magnitude <= 5.2 or (hitPos - realPos).Magnitude <= 6.0 then
+                    local nearUs = (closest - realPos).Magnitude <= 10.0 or (hitPos - realPos).Magnitude <= 10.0
+
+                    -- Identify shooter shooting near/at us for Reactive Auto-Evade & AutoHvH Threat Focus!
+                    if nearUs then
+                        local now = os.clock()
+                        local bestPlr, bestD = nil, 14
+                        local list = (#App.Scheduler.Players > 0 and App.Scheduler.Players) or Players:GetPlayers()
+                        for _, plr in ipairs(list) do
+                            if plr ~= LocalPlayer then
+                                local info = App.WorldCache.Players[plr]
+                                local pHead = (info and info.head) or (info and info.hrp) or GetRoot(plr.Character)
+                                if pHead and pHead.Parent then
+                                    local d = (pHead.Position - origin).Magnitude
+                                    if d < bestD then bestD = d; bestPlr = plr end
+                                end
+                            end
+                        end
+                        if bestPlr then
+                            App.Anomaly.LastAttackers[bestPlr] = now
+                            HoloShieldState.LastAttacker = bestPlr
+                            HoloShieldState.LastAttackClock = now
+                        end
+                    end
+
+                    if State.HoloShield and ((closest - shieldPos).Magnitude <= 5.2 or (hitPos - realPos).Magnitude <= 6.0) then
                         RegisterHoloShieldHit(15, closest)
                     end
                 end
@@ -1384,7 +1697,7 @@ if Remotes.ReplicateEvent and Remotes.ReplicateEvent:IsA("RemoteEvent") then
 end
 
 -- ============================================================================
--- // SECTION 5: FIXED SAFE WEAPON GRABBER (ALL GUNS + HAMMER + KNIFE) & .COMBO1
+-- // SECTION 5: CACHED WEAPON GRABBER (2026 SNIPER + MELEE) & .COMBO1
 -- ============================================================================
 local KnownGunLocations = {
     ["Remington 870"] = {
@@ -1417,6 +1730,14 @@ local KnownGunLocations = {
         GamepassId = 1443271,
         SearchPivot = Vector3.new(-938.5, 91.2783, 2039.2555),
         UndergroundCF = CFrame.new(-938.5, 85.0, 2039.2555),
+    },
+    ["M700"] = {
+        SearchPivot = Vector3.new(834.5, 97.85, 2229.4),
+        UndergroundCF = CFrame.new(834.5, 91.5, 2229.4),
+    },
+    ["Revolver"] = {
+        SearchPivot = Vector3.new(827.5, 97.85, 2229.4),
+        UndergroundCF = CFrame.new(827.5, 91.5, 2229.4),
     },
     ["Hammer"] = {
         SearchPivot = Vector3.new(778.0, 97.5, 2480.0),
@@ -1455,50 +1776,79 @@ local function IsGiverTeamAllowed(giver)
     return not hasTeamRestriction
 end
 
+local function RebuildGiverCache()
+    local wc = App.WorldCache
+    table.clear(wc.GiversByName)
+    table.clear(wc.GiversAll)
+    local seen = {}
+
+    local function pushGiver(inst)
+        if not inst or seen[inst] then return end
+        seen[inst] = true
+        table.insert(wc.GiversAll, inst)
+        local toolAttr = inst:GetAttribute("ToolName") or (inst.Parent and inst.Parent:GetAttribute("ToolName"))
+        local keys = { string.lower(inst.Name) }
+        if type(toolAttr) == "string" then table.insert(keys, string.lower(toolAttr)) end
+        if inst.Parent then table.insert(keys, string.lower(inst.Parent.Name)) end
+        for _, k in ipairs(keys) do
+            if k ~= "" then
+                wc.GiversByName[k] = wc.GiversByName[k] or {}
+                table.insert(wc.GiversByName[k], inst)
+            end
+        end
+    end
+
+    local ok, queried = pcall(function() return Workspace:QueryDescendants("#TouchGiver") end)
+    if ok and type(queried) == "table" then
+        for _, g in ipairs(queried) do pushGiver(g) end
+    end
+    local okT, tagged = pcall(function() return CollectionService:GetTagged("Giver") end)
+    if okT and type(tagged) == "table" then
+        for _, g in ipairs(tagged) do pushGiver(g) end
+    end
+    local singleFolder = Workspace:FindFirstChild("Prison_ITEMS") and Workspace.Prison_ITEMS:FindFirstChild("single")
+    if singleFolder then
+        for _, g in ipairs(singleFolder:GetChildren()) do pushGiver(g) end
+    end
+    wc.GiverBuiltAt = os.clock()
+end
+
 local function FindTouchGiverForWeapon(weaponName)
     local info = KnownGunLocations[weaponName]
     if info and info.GamepassId and not OwnsGamepass(info.GamepassId) then
         return nil, nil
     end
 
-    local givers = {}
-    local ok, queried = pcall(function() return Workspace:QueryDescendants("#TouchGiver") end)
-    if ok and type(queried) == "table" and #queried > 0 then
-        givers = queried
-    end
-    local okT, tagged = pcall(function() return CollectionService:GetTagged("Giver") end)
-    if okT and type(tagged) == "table" then
-        for _, inst in ipairs(tagged) do table.insert(givers, inst) end
-    end
-    local singleFolder = Workspace:FindFirstChild("Prison_ITEMS") and Workspace.Prison_ITEMS:FindFirstChild("single")
-    if singleFolder then
-        for _, child in ipairs(singleFolder:GetChildren()) do table.insert(givers, child) end
+    local wc = App.WorldCache
+    if #wc.GiversAll == 0 or (os.clock() - wc.GiverBuiltAt) > 25 then
+        RebuildGiverCache()
     end
 
     local lowTarget = string.lower(weaponName)
-    for _, giver in ipairs(givers) do
-        local toolAttr = giver:GetAttribute("ToolName") or (giver.Parent and giver.Parent:GetAttribute("ToolName"))
-        local matched = (type(toolAttr) == "string" and string.lower(toolAttr) == lowTarget)
-            or (string.lower(giver.Name) == lowTarget)
-            or (giver.Parent and string.lower(giver.Parent.Name) == lowTarget)
-        if matched and IsGiverTeamAllowed(giver) then
-            local okP, piv = pcall(function() return giver:GetPivot() end)
-            if okP and piv then
-                local pos = piv.Position
-                return giver, CFrame.new(pos.X, pos.Y - 6.0, pos.Z)
+    local bucket = wc.GiversByName[lowTarget]
+    if bucket then
+        for _, giver in ipairs(bucket) do
+            if giver and giver.Parent and IsGiverTeamAllowed(giver) then
+                local okP, piv = pcall(function() return giver:GetPivot() end)
+                if okP and piv then
+                    local pos = piv.Position
+                    return giver, CFrame.new(pos.X, pos.Y - 6.0, pos.Z)
+                end
             end
         end
     end
 
     if info then
         local closest, bestDist = nil, 25
-        for _, giver in ipairs(givers) do
-            local okP, pivot = pcall(function() return giver:GetPivot() end)
-            if okP and pivot then
-                local dist = (pivot.Position - info.SearchPivot).Magnitude
-                if dist < bestDist then
-                    bestDist = dist
-                    closest = giver
+        for _, giver in ipairs(wc.GiversAll) do
+            if giver and giver.Parent then
+                local okP, pivot = pcall(function() return giver:GetPivot() end)
+                if okP and pivot then
+                    local dist = (pivot.Position - info.SearchPivot).Magnitude
+                    if dist < bestDist then
+                        bestDist = dist
+                        closest = giver
+                    end
                 end
             end
         end
@@ -1529,6 +1879,7 @@ local function ApplyGunModsToTool(tool)
             AutoFire = tool:GetAttribute("AutoFire"),
             Range = tool:GetAttribute("Range"),
             AccurateRange = tool:GetAttribute("AccurateRange"),
+            ChargeTime = tool:GetAttribute("ChargeTime"),
         }
     end
 
@@ -1546,12 +1897,18 @@ local function ApplyGunModsToTool(tool)
                 tool:SetAttribute("Range", 9999)
                 tool:SetAttribute("AccurateRange", 9999)
             end
+            if State.GunZeroChargeTime and orig.ChargeTime ~= nil then
+                tool:SetAttribute("ChargeTime", 0)
+            elseif orig.ChargeTime ~= nil then
+                tool:SetAttribute("ChargeTime", orig.ChargeTime)
+            end
         elseif orig then
             if orig.FireRate then tool:SetAttribute("FireRate", orig.FireRate) end
             if orig.SpreadRadius then tool:SetAttribute("SpreadRadius", orig.SpreadRadius) end
             if orig.AutoFire ~= nil then tool:SetAttribute("AutoFire", orig.AutoFire) end
             if orig.Range then tool:SetAttribute("Range", orig.Range) end
             if orig.AccurateRange then tool:SetAttribute("AccurateRange", orig.AccurateRange) end
+            if orig.ChargeTime ~= nil then tool:SetAttribute("ChargeTime", orig.ChargeTime) end
         end
     end)
 end
@@ -1788,6 +2145,15 @@ end
 
 local function GetCarSeats(carModel, myHum)
     if not carModel or not carModel.Parent then return nil, nil end
+    local entry = App.WorldCache.Cars[carModel]
+    if entry and entry.drv then
+        local drv = (entry.drv.Parent and (not entry.drv.Occupant or entry.drv.Occupant == myHum)) and entry.drv or nil
+        local pass = nil
+        for _, ps in ipairs(entry.passSeats) do
+            if ps.Parent and not ps.Occupant then pass = ps; break end
+        end
+        return drv, pass
+    end
     local drv, pass = nil, nil
     for _, desc in ipairs(carModel:GetDescendants()) do
         if desc:IsA("VehicleSeat") and (not desc.Occupant or desc.Occupant == myHum) then
@@ -1908,7 +2274,46 @@ local function AcquireUsableCar(myHum)
     return nil, nil, nil
 end
 
--- Unified KX Vehicle Target Manipulation Engine (Supports: "bring", "forcecrim", "void", "fling")
+-- Unified KX Vehicle Target Manipulation Engine (Fixed Upright Chassis + Collision-Free Scoop)
+local function SetCarBodyCollide(carModel, enabled, origStates)
+    local entry = App.WorldCache.Cars[carModel]
+    local parts = entry and entry.nonWheels
+    if not parts then
+        parts = {}
+        for _, desc in ipairs(carModel:GetDescendants()) do
+            if desc:IsA("BasePart") and desc.CollisionGroup ~= "Wheels" then
+                table.insert(parts, desc)
+            end
+        end
+    end
+    for _, p in ipairs(parts) do
+        if p and p.Parent then
+            if not enabled then
+                if origStates[p] == nil then origStates[p] = p.CanCollide end
+                p.CanCollide = false
+            elseif origStates[p] ~= nil then
+                p.CanCollide = origStates[p]
+            end
+        end
+    end
+end
+
+local function ZeroCarVelocity(carModel, drvSeat)
+    if drvSeat and drvSeat.Parent then
+        drvSeat.AssemblyLinearVelocity = Vector3.zero
+        drvSeat.AssemblyAngularVelocity = Vector3.zero
+    end
+    local entry = App.WorldCache.Cars[carModel]
+    if entry and entry.nonWheels then
+        for _, p in ipairs(entry.nonWheels) do
+            if p and p.Parent then
+                p.AssemblyLinearVelocity = Vector3.zero
+                p.AssemblyAngularVelocity = Vector3.zero
+            end
+        end
+    end
+end
+
 local function ExecuteCarTargetAction(targetPlr, actionMode)
     if not targetPlr or targetPlr == LocalPlayer then
         Notify("KX Car Action", "Select a valid target player first!", 2.5)
@@ -1925,7 +2330,7 @@ local function ExecuteCarTargetAction(targetPlr, actionMode)
     end
 
     task.spawn(function()
-        local returnCF = myHrp.CFrame
+        local returnCF = CFrame.new(myHrp.Position)
         local carModel, drvSeat, passSeat = AcquireUsableCar(myHum)
         if not carModel or not drvSeat or not passSeat then
             Notify("KX Car Action", "No vehicle available! Run .savecar first.", 3)
@@ -1933,17 +2338,25 @@ local function ExecuteCarTargetAction(targetPlr, actionMode)
         end
 
         if myHum.SeatPart ~= drvSeat then
-            SafeTeleport(drvSeat.CFrame + Vector3.new(0, 2.2, 0))
+            SafeTeleport(drvSeat.CFrame + Vector3.new(0, 2.4, 0))
             task.wait(0.1)
             pcall(function() drvSeat:Sit(myHum) end)
-            task.wait(0.2)
+            task.wait(0.22)
         end
         if myHum.SeatPart ~= drvSeat then
             Notify("KX Car Action", "Could not enter driver seat!", 2.5)
             return
         end
 
-        local deadline = os.clock() + 1.5
+        -- Lock upright yaw + seat local offset ONCE so bumps/curbs never flip car or camera upside down!
+        local carPivot = carModel:GetPivot()
+        local _, yaw, _ = carPivot:ToEulerAnglesYXZ()
+        local flatRot = CFrame.fromEulerAnglesYXZ(0, yaw, 0)
+        local seatOffsetFlat = flatRot:VectorToWorldSpace(carPivot:PointToObjectSpace(passSeat.Position))
+        local origCollide = {}
+        SetCarBodyCollide(carModel, false, origCollide)
+
+        local deadline = os.clock() + 1.65
         local seated = false
         while os.clock() < deadline do
             local curTHrp = GetRoot(targetPlr.Character)
@@ -1953,37 +2366,55 @@ local function ExecuteCarTargetAction(targetPlr, actionMode)
                 break
             end
             local velLead = (curTHrp.AssemblyLinearVelocity or Vector3.zero) * 0.14
-            local offset = passSeat.Position - carModel:GetPivot().Position
+            local goalPos = (curTHrp.Position + velLead) - seatOffsetFlat
             pcall(function()
-                carModel:PivotTo(CFrame.new((curTHrp.Position + velLead) - offset))
-                drvSeat.AssemblyLinearVelocity = Vector3.zero
+                carModel:PivotTo(CFrame.new(goalPos) * flatRot)
+                ZeroCarVelocity(carModel, drvSeat)
             end)
             RunService.Heartbeat:Wait()
         end
 
+        local arrivalCF = CFrame.new(returnCF.Position + Vector3.new(0, 3.0, 0)) * flatRot
         if seated then
             if actionMode == "bring" then
-                pcall(function() carModel:PivotTo(returnCF) end)
-                task.wait(0.15)
+                pcall(function()
+                    carModel:PivotTo(arrivalCF)
+                    ZeroCarVelocity(carModel, drvSeat)
+                end)
+                task.wait(0.14)
+                ZeroCarVelocity(carModel, drvSeat)
+                SetCarBodyCollide(carModel, true, origCollide)
                 myHum.Sit = false
                 Notify("KX Bring", "Brought " .. targetPlr.Name .. "!", 2.5)
             elseif actionMode == "forcecrim" then
                 local crimSpawn = Workspace:FindFirstChild("Criminals Spawn")
                 local sp = crimSpawn and (crimSpawn:FindFirstChild("SpawnLocation") or crimSpawn:FindFirstChildWhichIsA("BasePart", true))
                 if sp then
-                    pcall(function() carModel:PivotTo(sp.CFrame + Vector3.new(0, 3, 0)) end)
+                    pcall(function()
+                        carModel:PivotTo(CFrame.new(sp.Position + Vector3.new(0, 3.8, 0)) * flatRot)
+                        ZeroCarVelocity(carModel, drvSeat)
+                    end)
                     task.wait(0.32)
                 end
-                pcall(function() carModel:PivotTo(returnCF) end)
+                pcall(function()
+                    carModel:PivotTo(arrivalCF)
+                    ZeroCarVelocity(carModel, drvSeat)
+                end)
+                SetCarBodyCollide(carModel, true, origCollide)
                 Notify("KX ForceCrim", "Forced " .. targetPlr.Name .. " to Criminals!", 2.5)
             elseif actionMode == "void" or actionMode == "forcekick" then
-                pcall(function() carModel:PivotTo(CFrame.new(returnCF.X, -420, returnCF.Z)) end)
+                pcall(function()
+                    carModel:PivotTo(CFrame.new(returnCF.X, -420, returnCF.Z) * flatRot)
+                    ZeroCarVelocity(carModel, drvSeat)
+                end)
                 task.wait(0.28)
+                SetCarBodyCollide(carModel, true, origCollide)
                 myHum.Sit = false
                 task.wait(0.06)
-                SafeTeleport(returnCF)
+                SafeTeleport(returnCF + Vector3.new(0, 1.5, 0))
                 Notify("KX Void", "Dropped " .. targetPlr.Name .. " into the void!", 2.5)
             elseif actionMode == "fling" then
+                SetCarBodyCollide(carModel, true, origCollide)
                 pcall(function()
                     drvSeat.AssemblyLinearVelocity = Vector3.new(0, 650, 0)
                     drvSeat.AssemblyAngularVelocity = Vector3.new(120, 260, 120)
@@ -1991,11 +2422,17 @@ local function ExecuteCarTargetAction(targetPlr, actionMode)
                 task.wait(0.22)
                 myHum.Sit = false
                 task.wait(0.06)
-                SafeTeleport(returnCF)
+                SafeTeleport(returnCF + Vector3.new(0, 1.5, 0))
                 Notify("KX Car Fling", "Flung " .. targetPlr.Name .. "!", 2.5)
+            else
+                SetCarBodyCollide(carModel, true, origCollide)
             end
         else
-            pcall(function() carModel:PivotTo(returnCF) end)
+            pcall(function()
+                carModel:PivotTo(arrivalCF)
+                ZeroCarVelocity(carModel, drvSeat)
+            end)
+            SetCarBodyCollide(carModel, true, origCollide)
             Notify("KX Car Action", targetPlr.Name .. " moved out of seat range.", 2.2)
         end
     end)
@@ -2021,32 +2458,47 @@ local function SpawnAndEnterNearestCar()
     end)
 end
 
--- KX WheelAura Visual Customization on Driven Vehicle
+-- KX WheelAura Visual Customization (Uses cached WorldCache.Cars — ZERO GetDescendants per Heartbeat!)
 local WheelAuraParts = setmetatable({}, { __mode = "k" })
+local LastWheelAuraSeat = nil
 local function UpdateVehicleWheelAura(seat)
     if not State.WheelAura or not seat then
-        for inst, fx in pairs(WheelAuraParts) do
-            pcall(function() fx:Destroy() end)
-            WheelAuraParts[inst] = nil
+        if LastWheelAuraSeat ~= nil then
+            for inst, fx in pairs(WheelAuraParts) do
+                pcall(function() fx:Destroy() end)
+                WheelAuraParts[inst] = nil
+            end
+            LastWheelAuraSeat = nil
         end
         return
     end
+    if seat == LastWheelAuraSeat then return end
+    LastWheelAuraSeat = seat
+
     local car = seat:FindFirstAncestorOfClass("Model")
     if not car then return end
-    for _, desc in ipairs(car:GetDescendants()) do
-        if desc:IsA("BasePart") and (desc.Name:lower():find("wheel") or desc.CollisionGroup == "Wheels") then
-            if not WheelAuraParts[desc] then
-                local pe = Instance.new("ParticleEmitter")
-                pe.Name = "PL2026_WheelAura"
-                pe.Color = ColorSequence.new(Color3.fromRGB(0, 235, 255), Color3.fromRGB(160, 75, 255))
-                pe.Size = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.7), NumberSequenceKeypoint.new(1, 0) })
-                pe.Lifetime = NumberRange.new(0.25, 0.45)
-                pe.Rate = 45
-                pe.Speed = NumberRange.new(2, 6)
-                pe.LightEmission = 1
-                pe.Parent = desc
-                WheelAuraParts[desc] = pe
+    local entry = App.WorldCache.Cars[car]
+    local wheelList = entry and entry.wheels
+    if not wheelList then
+        wheelList = {}
+        for _, desc in ipairs(car:GetDescendants()) do
+            if desc:IsA("BasePart") and (desc.Name:lower():find("wheel") or desc.CollisionGroup == "Wheels") then
+                table.insert(wheelList, desc)
             end
+        end
+    end
+    for _, desc in ipairs(wheelList) do
+        if desc and desc.Parent and not WheelAuraParts[desc] then
+            local pe = Instance.new("ParticleEmitter")
+            pe.Name = "PL2026_WheelAura"
+            pe.Color = ColorSequence.new(Color3.fromRGB(0, 235, 255), Color3.fromRGB(160, 75, 255))
+            pe.Size = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.7), NumberSequenceKeypoint.new(1, 0) })
+            pe.Lifetime = NumberRange.new(0.25, 0.45)
+            pe.Rate = 45
+            pe.Speed = NumberRange.new(2, 6)
+            pe.LightEmission = 1
+            pe.Parent = desc
+            WheelAuraParts[desc] = pe
         end
     end
 end
@@ -2589,12 +3041,17 @@ do
 end
 
 -- ============================================================================
--- // SECTION 10: ROLE-COLORED ESP (30-CAP), MINI-KILLFEED & ANOMALY DETECTOR
+-- // SECTION 10: DISTANCE-LOD ESP (30-CAP), MINI-KILLFEED & GRACE ANOMALIES
 -- ============================================================================
 do
     local ESPObjects = {}
     local C4Highlights = {}
     Core.ESPObjects = ESPObjects
+
+    function Core.IsAnomalyFlagged(plr)
+        if not plr then return false end
+        return (App.Anomaly.Flagged[plr.UserId] or 0) > os.clock()
+    end
 
     function Core.RemovePlayerESP(plr)
         local data = ESPObjects[plr]
@@ -2603,6 +3060,7 @@ do
             if data.Billboard then pcall(function() data.Billboard:Destroy() end) end
             ESPObjects[plr] = nil
         end
+        App.Anomaly.LastPos = App.Anomaly.LastPos or setmetatable({}, { __mode = "k" })
     end
 
     function Core.RemoveAllC4ESP()
@@ -2614,102 +3072,32 @@ do
 
     function Core.UpdatePlayerESP()
         local myHrp = GetRoot(LocalPlayer.Character)
-        local highlightCount = 0
+        local originPos = (myHrp and myHrp.Position) or Camera.CFrame.Position
+        local maxTotalHL = clamp(tonumber(State.ESPHighlightMax) or 30, 1, 30)
+        local detailDist = clamp(tonumber(State.ESPDetailDistance) or 140, 40, 600)
 
-        for _, plr in ipairs(Players:GetPlayers()) do
-            if plr ~= LocalPlayer then
-                local char = plr.Character
-                local hrp = GetRoot(char)
-                local hum = GetHumanoid(char)
-                local hideTeammate = State.ESPHideTeam and (plr.Team == LocalPlayer.Team)
-
-                if State.ESP and not hideTeammate and char and hrp and hum and hum.Health > 0 then
-                    if hrp.Transparency < 1 then hrp.Transparency = 1 end
-
-                    local data = ESPObjects[plr]
-                    if not data then
-                        data = {}
-                        local hl = Instance.new("Highlight")
-                        hl.Name = "PL2026_HL"
-                        hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-                        hl.FillTransparency = 0.72
-                        hl.OutlineTransparency = 0.14
-                        hl.Parent = OverlayGui
-                        data.Highlight = hl
-
-                        local bb = Instance.new("BillboardGui")
-                        bb.Name = "PL2026_BB"
-                        bb.Size = UDim2.fromOffset(165, 38)
-                        bb.StudsOffset = Vector3.new(0, 3.1, 0)
-                        bb.AlwaysOnTop = true
-                        bb.Parent = OverlayGui
-                        data.Billboard = bb
-
-                        local lbl = Instance.new("TextLabel")
-                        lbl.Size = UDim2.fromScale(1, 1)
-                        lbl.BackgroundTransparency = 1
-                        lbl.Font = Enum.Font.GothamBold
-                        lbl.TextSize = 11
-                        lbl.TextStrokeTransparency = 0.15
-                        lbl.Parent = bb
-                        data.Label = lbl
-
-                        ESPObjects[plr] = data
-                    end
-
-                    local teamColor = (plr.Team and plr.Team.TeamColor.Color) or Color3.fromRGB(220, 220, 220)
-                    highlightCount = highlightCount + 1
-                    data.Highlight.Enabled = State.ESPHighlight and (highlightCount <= 30)
-                    data.Highlight.Adornee = char
-                    data.Highlight.FillColor = teamColor
-                    data.Highlight.OutlineColor = teamColor
-
-                    data.Billboard.Enabled = State.ESPNameTag or State.ESPHealth or State.ESPDistance or State.ESPWeapon
-                    data.Billboard.Adornee = char:FindFirstChild("Head") or hrp
-
-                    local dist = myHrp and round((hrp.Position - myHrp.Position).Magnitude) or 0
-                    local tool = char:FindFirstChildOfClass("Tool")
-
-                    local lines = {}
-                    if State.ESPNameTag then
-                        local flags = ""
-                        if State.ESPStatusFlags then
-                            if char:GetAttribute("Hostile") then flags = flags .. " [HOSTILE]"
-                            elseif char:GetAttribute("Trespassing") then flags = flags .. " [TRESPASS]" end
-                            if char:GetAttribute("Tased") then flags = flags .. " [TASED]" end
-                        end
-                        table.insert(lines, string.format("%s%s", plr.DisplayName or plr.Name, flags))
-                    end
-
-                    if dist <= 240 or tool then
-                        local infoParts = {}
-                        if State.ESPHealth then table.insert(infoParts, string.format("%dHP", round(hum.Health))) end
-                        if State.ESPDistance then table.insert(infoParts, string.format("%dm", dist)) end
-                        if State.ESPWeapon and tool then table.insert(infoParts, string.format("[%s]", tool.Name)) end
-                        if #infoParts > 0 then table.insert(lines, table.concat(infoParts, " • ")) end
-                    end
-
-                    data.Label.TextColor3 = teamColor
-                    data.Label.Text = table.concat(lines, "\n")
-                else
-                    Core.RemovePlayerESP(plr)
-                end
-            end
-        end
-
+        -- Reserve C4 highlight slots first inside the strict 30-Highlight Roblox budget
+        local usedC4HL = 0
         if State.C4ESP then
-            for _, c4 in ipairs(CollectionService:GetTagged("C4")) do
-                if not C4Highlights[c4] then
-                    local hl = Instance.new("Highlight")
-                    hl.Name = "PL2026_C4HL"
-                    hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-                    hl.FillColor = Color3.fromRGB(255, 50, 50)
-                    hl.OutlineColor = Color3.fromRGB(255, 220, 0)
-                    hl.FillTransparency = 0.35
-                    hl.OutlineTransparency = 0
-                    hl.Adornee = c4
-                    hl.Parent = OverlayGui
-                    C4Highlights[c4] = hl
+            local c4s = CollectionService:GetTagged("C4")
+            for _, c4 in ipairs(c4s) do
+                if usedC4HL < math.min(6, maxTotalHL) then
+                    if not C4Highlights[c4] then
+                        local hl = Instance.new("Highlight")
+                        hl.Name = "PL2026_C4HL"
+                        hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+                        hl.FillColor = Color3.fromRGB(255, 50, 50)
+                        hl.OutlineColor = Color3.fromRGB(255, 220, 0)
+                        hl.FillTransparency = 0.35
+                        hl.OutlineTransparency = 0
+                        hl.Adornee = c4
+                        hl.Parent = OverlayGui
+                        C4Highlights[c4] = hl
+                    end
+                    usedC4HL = usedC4HL + 1
+                elseif C4Highlights[c4] then
+                    pcall(function() C4Highlights[c4]:Destroy() end)
+                    C4Highlights[c4] = nil
                 end
             end
             for c4, hl in pairs(C4Highlights) do
@@ -2721,9 +3109,118 @@ do
         else
             Core.RemoveAllC4ESP()
         end
+
+        local playerBudget = math.max(0, maxTotalHL - usedC4HL)
+        local snapshot = (#App.Scheduler.Players > 0 and App.Scheduler.Players) or Players:GetPlayers()
+        local candidates = {}
+
+        for _, plr in ipairs(snapshot) do
+            if plr ~= LocalPlayer then
+                local info = App.WorldCache.Players[plr]
+                local char = (info and info.char and info.char.Parent and info.char) or plr.Character
+                local hrp = (info and info.hrp and info.hrp.Parent == char and info.hrp) or GetRoot(char)
+                local hum = (info and info.hum and info.hum.Parent == char and info.hum) or GetHumanoid(char)
+                local hideTeammate = State.ESPHideTeam and (plr.Team == LocalPlayer.Team)
+
+                if State.ESP and not hideTeammate and char and hrp and hum and hum.Health > 0 then
+                    if hrp.Transparency < 1 then hrp.Transparency = 1 end
+                    local dist = (hrp.Position - originPos).Magnitude
+                    table.insert(candidates, { plr = plr, info = info, char = char, hrp = hrp, hum = hum, dist = dist })
+                else
+                    Core.RemovePlayerESP(plr)
+                end
+            end
+        end
+
+        -- Sort closest players first so the nearest 30 ALWAYS receive 3D Highlight chams!
+        table.sort(candidates, function(a, b) return a.dist < b.dist end)
+
+        for rank, item in ipairs(candidates) do
+            local plr, info, char, hrp, hum, dist = item.plr, item.info, item.char, item.hrp, item.hum, item.dist
+            local data = ESPObjects[plr]
+            if not data then
+                data = {}
+                local hl = Instance.new("Highlight")
+                hl.Name = "PL2026_HL"
+                hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+                hl.FillTransparency = 0.72
+                hl.OutlineTransparency = 0.14
+                hl.Parent = OverlayGui
+                data.Highlight = hl
+
+                local bb = Instance.new("BillboardGui")
+                bb.Name = "PL2026_BB"
+                bb.Size = UDim2.fromOffset(165, 38)
+                bb.StudsOffset = Vector3.new(0, 3.1, 0)
+                bb.AlwaysOnTop = true
+                bb.Parent = OverlayGui
+                data.Billboard = bb
+
+                local lbl = Instance.new("TextLabel")
+                lbl.Size = UDim2.fromScale(1, 1)
+                lbl.BackgroundTransparency = 1
+                lbl.Font = Enum.Font.GothamBold
+                lbl.TextSize = 11
+                lbl.TextStrokeTransparency = 0.15
+                lbl.Parent = bb
+                data.Label = lbl
+
+                ESPObjects[plr] = data
+            end
+
+            local isCheat = Core.IsAnomalyFlagged(plr)
+            local teamColor = (isCheat and Color3.fromRGB(255, 65, 220)) or ((plr.Team and plr.Team.TeamColor.Color) or Color3.fromRGB(220, 220, 220))
+            local allowHL = State.ESPHighlight and (rank <= playerBudget)
+            data.Highlight.Enabled = allowHL
+            data.Highlight.Adornee = allowHL and char or nil
+            data.Highlight.FillColor = teamColor
+            data.Highlight.OutlineColor = teamColor
+
+            local anyText = State.ESPNameTag or State.ESPHealth or State.ESPDistance or State.ESPWeapon
+            data.Billboard.Enabled = anyText
+            data.Billboard.Adornee = (info and info.head and info.head.Parent == char and info.head) or hrp
+
+            local roundedDist = round(dist)
+            -- Distance-LOD: Full details inside ESPDetailDistance & Top-30, compact ◆ diamond pip beyond!
+            if roundedDist > detailDist then
+                data.Billboard.Size = UDim2.fromOffset(80, 22)
+                data.Label.TextSize = 10
+                data.Label.TextColor3 = teamColor
+                data.Label.Text = isCheat and string.format("◆ %dm [CHEAT]", roundedDist) or string.format("◆ %dm", roundedDist)
+            else
+                data.Billboard.Size = UDim2.fromOffset(165, 38)
+                data.Label.TextSize = 11
+                local tool = (info and info.tool and info.tool.Parent == char and info.tool) or char:FindFirstChildOfClass("Tool")
+                local lines = {}
+                if State.ESPNameTag then
+                    local flags = isCheat and " [CHEAT]" or ""
+                    if State.ESPStatusFlags then
+                        if char:GetAttribute("Hostile") then flags = flags .. " [HOSTILE]"
+                        elseif char:GetAttribute("Trespassing") then flags = flags .. " [TRESPASS]" end
+                        if char:GetAttribute("Tased") then flags = flags .. " [TASED]" end
+                    end
+                    table.insert(lines, string.format("%s%s", plr.DisplayName or plr.Name, flags))
+                end
+
+                local infoParts = {}
+                if State.ESPHealth then table.insert(infoParts, string.format("%dHP", round(hum.Health))) end
+                if State.ESPDistance then table.insert(infoParts, string.format("%dm", roundedDist)) end
+                if State.ESPWeapon and tool then table.insert(infoParts, string.format("[%s]", tool.Name)) end
+                if #infoParts > 0 then table.insert(lines, table.concat(infoParts, " • ")) end
+
+                data.Label.TextColor3 = teamColor
+                data.Label.Text = table.concat(lines, "\n")
+            end
+        end
     end
 
-    AddConnection(Players.PlayerRemoving:Connect(Core.RemovePlayerESP))
+    AddConnection(Players.PlayerRemoving:Connect(function(plr)
+        Core.RemovePlayerESP(plr)
+        App.Anomaly.GraceUntil[plr.UserId] = nil
+        App.Anomaly.StrikeInfo[plr.UserId] = nil
+        App.Anomaly.Flagged[plr.UserId] = nil
+        App.Anomaly.LastAttackers[plr] = nil
+    end))
 
     -- Crisp Mini-Killfeed Watcher (ZERO WindUI Toast Spam!)
     local KillerStreaks = {}
@@ -2762,56 +3259,70 @@ do
         end
     end)
 
-    -- Multi-Strike Heuristic Cheater & Car-TP Anomaly Detector (12s TTL)
-    local AnomalyTracker = {
-        PrevPos = setmetatable({}, { __mode = "k" }),
-        PrevSeated = setmetatable({}, { __mode = "k" }),
-        Strikes = {},
-    }
+    -- False-Positive-Hardened Multi-Strike Anomaly Detector (With Spawn/Team/Arrest/Ping Grace!)
+    local PrevPos = setmetatable({}, { __mode = "k" })
+    local PrevSeated = setmetatable({}, { __mode = "k" })
 
     function Core.EvaluateAnomalies()
-        if not State.CheaterAlerts and not State.CarTPAlerts then return end
+        if not State.CheaterAlerts and not State.CarTPAlerts and not State.AutoHvH then return end
         local now = os.clock()
-        for uid, st in pairs(AnomalyTracker.Strikes) do
-            if (now - st.lastStrike) > 12 then AnomalyTracker.Strikes[uid] = nil end
+        for uid, st in pairs(App.Anomaly.StrikeInfo) do
+            if (now - st.lastStrike) > 14 then App.Anomaly.StrikeInfo[uid] = nil end
         end
-        for _, plr in ipairs(Players:GetPlayers()) do
+        for uid, exp in pairs(App.Anomaly.Flagged) do
+            if exp <= now then App.Anomaly.Flagged[uid] = nil end
+        end
+
+        local snapshot = (#App.Scheduler.Players > 0 and App.Scheduler.Players) or Players:GetPlayers()
+        for _, plr in ipairs(snapshot) do
             if plr ~= LocalPlayer then
-                local char = plr.Character
-                local hrp = GetRoot(char)
-                local hum = GetHumanoid(char)
+                local info = App.WorldCache.Players[plr]
+                local char = (info and info.char and info.char.Parent and info.char) or plr.Character
+                local hrp = (info and info.hrp and info.hrp.Parent == char and info.hrp) or GetRoot(char)
+                local hum = (info and info.hum and info.hum.Parent == char and info.hum) or GetHumanoid(char)
                 if hrp and hum and hum.Health > 0 then
                     local seated = (hum.SeatPart and hum.SeatPart:IsA("VehicleSeat")) ~= nil
-                    local prev = AnomalyTracker.PrevPos[plr]
-                    local wasSeated = AnomalyTracker.PrevSeated[plr]
+                    local prev = PrevPos[plr]
+                    local wasSeated = PrevSeated[plr]
                     local curPos = hrp.Position
+                    local inGrace = (App.Anomaly.GraceUntil[plr.UserId] or 0) > now or char:FindFirstChildOfClass("ForceField") ~= nil
 
-                    if prev and prev.char == char then
-                        local dt = math.max(0.05, now - prev.t)
-                        local dist = (curPos - prev.pos).Magnitude
-                        local horizSpeed = Vector3.new(curPos.X - prev.pos.X, 0, curPos.Z - prev.pos.Z).Magnitude / dt
-                        local st = AnomalyTracker.Strikes[plr.UserId] or { count = 0, lastAlert = 0, lastStrike = 0 }
-                        if (now - st.lastStrike) > 12 then st.count = 0 end
+                    if not inGrace and prev and prev.char == char then
+                        local dt = now - prev.t
+                        -- Skip lag spikes (dt > 0.45s or dt < 0.04s) to prevent false rubberband alerts!
+                        if dt >= 0.04 and dt <= 0.45 then
+                            local dist = (curPos - prev.pos).Magnitude
+                            local horizSpeed = Vector3.new(curPos.X - prev.pos.X, 0, curPos.Z - prev.pos.Z).Magnitude / dt
+                            local st = App.Anomaly.StrikeInfo[plr.UserId] or { count = 0, consec = 0, lastAlert = 0, lastStrike = 0 }
+                            if (now - st.lastStrike) > 12 then st.count = 0; st.consec = 0 end
 
-                        if State.CarTPAlerts and seated and not wasSeated and dist > 115 then
-                            st.count = st.count + 2
-                            st.lastStrike = now
-                            if (now - st.lastAlert) > 10 then
-                                st.lastAlert = now
-                                PushMiniKillfeedLine(string.format("⚠ Car-TP: %s snapped %.0fm", plr.Name, dist), Color3.fromRGB(255, 110, 110))
+                            if State.CarTPAlerts and seated and not wasSeated and dist > 130 then
+                                st.count = st.count + 2
+                                st.lastStrike = now
+                                App.Anomaly.Flagged[plr.UserId] = now + 22
+                                if State.ShowMiniKillfeed and (now - st.lastAlert) > 10 then
+                                    st.lastAlert = now
+                                    PushMiniKillfeedLine(string.format("⚠ Car-TP: %s snapped %.0fm", plr.Name, dist), Color3.fromRGB(255, 110, 110))
+                                end
+                            elseif not seated and horizSpeed > 185 and dist > 62 then
+                                st.consec = st.consec + 1
+                                st.count = st.count + 1
+                                st.lastStrike = now
+                                if st.consec >= 2 and st.count >= 2 then
+                                    App.Anomaly.Flagged[plr.UserId] = now + 24
+                                    if State.CheaterAlerts and State.ShowMiniKillfeed and (now - st.lastAlert) > 10 then
+                                        st.lastAlert = now
+                                        PushMiniKillfeedLine(string.format("⚠ Speed/TP: %s (%.0f st/s)", plr.Name, horizSpeed), Color3.fromRGB(255, 165, 65))
+                                    end
+                                end
+                            else
+                                st.consec = 0
                             end
-                        elseif State.CheaterAlerts and not seated and horizSpeed > 180 and dist > 58 then
-                            st.count = st.count + 1
-                            st.lastStrike = now
-                            if st.count >= 2 and (now - st.lastAlert) > 10 then
-                                st.lastAlert = now
-                                PushMiniKillfeedLine(string.format("⚠ Speed/TP: %s (%.0f st/s)", plr.Name, horizSpeed), Color3.fromRGB(255, 165, 65))
-                            end
+                            App.Anomaly.StrikeInfo[plr.UserId] = st
                         end
-                        AnomalyTracker.Strikes[plr.UserId] = st
                     end
-                    AnomalyTracker.PrevPos[plr] = { pos = curPos, t = now, char = char }
-                    AnomalyTracker.PrevSeated[plr] = seated
+                    PrevPos[plr] = { pos = curPos, t = now, char = char }
+                    PrevSeated[plr] = seated
                 end
             end
         end
@@ -2819,7 +3330,7 @@ do
 end
 
 -- ============================================================================
--- // SECTION 11: 2026 MAXSPEED SUB-REGIONS & MAIN RUNTIME LOOPS
+-- // SECTION 11: MAXSPEED SUB-REGIONS, WORLDCACHE & CENTRALIZED SCHEDULER
 -- ============================================================================
 do
     local IndoorSubRegions = {
@@ -2859,6 +3370,185 @@ do
         return 92
     end
 
+    -- Event-Driven WorldCache Wiring (Zero per-frame GetDescendants!)
+    local OriginalDoorData = setmetatable({}, { __mode = "k" })
+    local OriginalHitboxData = setmetatable({}, { __mode = "k" })
+    local OriginalFenceData = setmetatable({}, { __mode = "k" })
+
+    local function RegisterCarModel(carModel)
+        if not carModel or not carModel:IsA("Model") or App.WorldCache.Cars[carModel] then return end
+        local entry = { model = carModel, drv = nil, passSeats = {}, nonWheels = {}, wheels = {} }
+        local function indexPart(d)
+            if d:IsA("VehicleSeat") then
+                entry.drv = d
+                table.insert(entry.nonWheels, d)
+            elseif d:IsA("Seat") then
+                table.insert(entry.passSeats, d)
+                table.insert(entry.nonWheels, d)
+            elseif d:IsA("BasePart") then
+                if d.Name:lower():find("wheel") or d.CollisionGroup == "Wheels" then
+                    table.insert(entry.wheels, d)
+                else
+                    table.insert(entry.nonWheels, d)
+                end
+            end
+        end
+        for _, d in ipairs(carModel:GetDescendants()) do indexPart(d) end
+        AddConnection(carModel.DescendantAdded:Connect(indexPart))
+        App.WorldCache.Cars[carModel] = entry
+    end
+
+    local function HookCarContainer(cc)
+        if not cc then return end
+        App.WorldCache.CarContainer = cc
+        for _, m in ipairs(cc:GetChildren()) do RegisterCarModel(m) end
+        AddConnection(cc.ChildAdded:Connect(RegisterCarModel))
+        AddConnection(cc.ChildRemoved:Connect(function(m)
+            App.WorldCache.Cars[m] = nil
+        end))
+    end
+
+    local function HookDoorsFolder(df)
+        if not df then return end
+        App.WorldCache.DoorsFolder = df
+        local function trackDoorPart(d)
+            if d:IsA("BasePart") and not App.WorldCache.DoorSet[d] then
+                App.WorldCache.DoorSet[d] = true
+                table.insert(App.WorldCache.Doors, d)
+            end
+        end
+        for _, d in ipairs(df:GetDescendants()) do trackDoorPart(d) end
+        AddConnection(df.DescendantAdded:Connect(trackDoorPart))
+    end
+
+    local function HookFencesFolder(ff)
+        if not ff then return end
+        local function trackFencePart(d)
+            if d:IsA("BasePart") and d:FindFirstChildOfClass("TouchTransmitter") and not App.WorldCache.FenceSet[d] then
+                App.WorldCache.FenceSet[d] = true
+                table.insert(App.WorldCache.Fences, d)
+                if State.FenceGodmode then
+                    OriginalFenceData[d] = d.CanTouch
+                    d.CanTouch = false
+                end
+            end
+        end
+        for _, d in ipairs(ff:GetDescendants()) do trackFencePart(d) end
+        AddConnection(ff.DescendantAdded:Connect(trackFencePart))
+    end
+
+    function Core.ApplyFenceGodmode(enabled)
+        State.FenceGodmode = enabled
+        for _, part in ipairs(App.WorldCache.Fences) do
+            if part and part.Parent then
+                if enabled then
+                    if OriginalFenceData[part] == nil then OriginalFenceData[part] = part.CanTouch end
+                    part.CanTouch = false
+                elseif OriginalFenceData[part] ~= nil then
+                    part.CanTouch = OriginalFenceData[part]
+                end
+            end
+        end
+    end
+
+    App.WorldCache.VFXPoolFolder = VFXPool
+    if Workspace:FindFirstChild("CarContainer") then HookCarContainer(Workspace.CarContainer) end
+    if Workspace:FindFirstChild("Doors") then HookDoorsFolder(Workspace.Doors) end
+    if Workspace:FindFirstChild("Prison_Fences") then HookFencesFolder(Workspace.Prison_Fences) end
+
+    for _, ch in ipairs(Workspace:GetChildren()) do
+        if ch:IsA("Model") and ch:GetAttribute("ToolName") then
+            App.WorldCache.Dropped[ch] = true
+        end
+    end
+    AddConnection(Workspace.ChildAdded:Connect(function(ch)
+        if ch.Name == "CarContainer" then HookCarContainer(ch)
+        elseif ch.Name == "Doors" then HookDoorsFolder(ch)
+        elseif ch.Name == "Prison_Fences" then HookFencesFolder(ch)
+        elseif ch:IsA("Model") and ch:GetAttribute("ToolName") then
+            App.WorldCache.Dropped[ch] = true
+        end
+    end))
+    AddConnection(Workspace.ChildRemoved:Connect(function(ch)
+        App.WorldCache.Dropped[ch] = nil
+    end))
+
+    pcall(function()
+        AddConnection(CollectionService:GetInstanceAddedSignal("Giver"):Connect(function()
+            App.WorldCache.GiverBuiltAt = 0
+        end))
+    end)
+
+    -- Event-Driven Remote Player Character Cache + Anomaly Grace Tracking
+    local function CacheRemotePlayerCharacter(plr, char)
+        if not plr or plr == LocalPlayer or not char then return end
+        App.Anomaly.GraceUntil[plr.UserId] = os.clock() + 3.0
+        local info = {
+            char = char,
+            hrp = char:FindFirstChild("HumanoidRootPart") or char:FindFirstChild("Torso") or char:FindFirstChild("UpperTorso"),
+            head = char:FindFirstChild("Head"),
+            hum = char:FindFirstChildOfClass("Humanoid"),
+            animator = nil,
+            riotShield = char:FindFirstChild("RiotShieldPart"),
+            tool = char:FindFirstChildOfClass("Tool"),
+            parts = {},
+        }
+        if info.hum then info.animator = info.hum:FindFirstChildOfClass("Animator") end
+        for _, d in ipairs(char:GetDescendants()) do
+            if d:IsA("BasePart") then table.insert(info.parts, d) end
+        end
+        App.WorldCache.Players[plr] = info
+
+        AddConnection(char.ChildAdded:Connect(function(child)
+            if child:IsA("Tool") then
+                info.tool = child
+            elseif child.Name == "HumanoidRootPart" then
+                info.hrp = child
+                table.insert(info.parts, child)
+            elseif child.Name == "Head" then
+                info.head = child
+                table.insert(info.parts, child)
+            elseif child.Name == "RiotShieldPart" and child:IsA("BasePart") then
+                info.riotShield = child
+                child.CanQuery = not State.AntiRiotShield
+            elseif child:IsA("Humanoid") then
+                info.hum = child
+                info.animator = child:FindFirstChildOfClass("Animator")
+            elseif child:IsA("BasePart") then
+                table.insert(info.parts, child)
+            end
+        end))
+        AddConnection(char.ChildRemoved:Connect(function(child)
+            if child == info.tool then info.tool = char:FindFirstChildOfClass("Tool") end
+            if child == info.riotShield then info.riotShield = nil end
+        end))
+        AddConnection(char:GetAttributeChangedSignal("Arrested"):Connect(function()
+            App.Anomaly.GraceUntil[plr.UserId] = os.clock() + 3.0
+        end))
+        AddConnection(char:GetAttributeChangedSignal("Tased"):Connect(function()
+            App.Anomaly.GraceUntil[plr.UserId] = os.clock() + 2.0
+        end))
+    end
+
+    local function HookPlayerTracking(plr)
+        if not plr or plr == LocalPlayer then return end
+        App.Anomaly.GraceUntil[plr.UserId] = os.clock() + 3.0
+        if plr.Character then CacheRemotePlayerCharacter(plr, plr.Character) end
+        AddConnection(plr.CharacterAdded:Connect(function(c) CacheRemotePlayerCharacter(plr, c) end))
+        AddConnection(plr:GetPropertyChangedSignal("Team"):Connect(function()
+            App.Anomaly.GraceUntil[plr.UserId] = os.clock() + 3.0
+        end))
+    end
+
+    for _, plr in ipairs(Players:GetPlayers()) do HookPlayerTracking(plr) end
+    AddConnection(Players.PlayerAdded:Connect(function(plr)
+        HookPlayerTracking(plr)
+        App.Scheduler.PlayersUpdated = 0
+    end))
+    AddConnection(Players.PlayerRemoving:Connect(function()
+        App.Scheduler.PlayersUpdated = 0
+    end))
+
     local LastTriggerShot = 0
     local LastRageShot = 0
     local LastArrestTime = 0
@@ -2866,6 +3556,7 @@ do
     local LastAutoTazeTime = 0
     local LastLoopKillTime = 0
     local LastComboLoopTime = 0
+    local LastUtilityTick = 0
     local LoopKillCursor = 1
     local FlyBV, FlyBG = nil, nil
 
@@ -2876,15 +3567,46 @@ do
         if hum and hum.PlatformStand then hum.PlatformStand = false end
     end
 
-    AddConnection(RunService.RenderStepped:Connect(function(dt)
-        -- Restore real position before camera renders so Desync/UndergroundPeek NEVER shakes your screen!
+    function Core.RestoreAllHitboxes()
+        for hrp, orig in pairs(OriginalHitboxData) do
+            if hrp and hrp.Parent then
+                pcall(function()
+                    hrp.Size = orig.Size
+                    hrp.CanCollide = orig.CanCollide
+                    hrp.Transparency = 1
+                end)
+            end
+        end
+        table.clear(OriginalHitboxData)
+    end
+
+    function Core.RestoreAllDoors()
+        for part, orig in pairs(OriginalDoorData) do
+            if part and part.Parent then
+                pcall(function()
+                    part.CanCollide = orig.CanCollide
+                    part.Transparency = orig.Transparency
+                end)
+            end
+        end
+        table.clear(OriginalDoorData)
+    end
+
+    -- CRITICAL CAMERA FIX FROM VIDEO:
+    -- BindToRenderStep BEFORE Camera (priority 185 < Camera 200) ensures UndergroundPeek /
+    -- DesyncBox ALWAYS restores standing SavedCF BEFORE CameraScript computes its transform!
+    pcall(RunService.UnbindFromRenderStep, RunService, "PL2026_ShieldRestore")
+    RunService:BindToRenderStep("PL2026_ShieldRestore", Enum.RenderPriority.Camera.Value - 15, function()
         if HoloShieldState.DesyncActive and HoloShieldState.SavedCF then
             local myHrp = GetRoot(LocalPlayer.Character)
             if myHrp then myHrp.CFrame = HoloShieldState.SavedCF end
             HoloShieldState.DesyncActive = false
             HoloShieldState.SavedCF = nil
         end
+    end)
 
+    -- Render-Rate Visual Aim & Triggerbot Loop
+    AddConnection(RunService.RenderStepped:Connect(function(dt)
         local screenCenter = Vector2.new(Camera.ViewportSize.X * 0.5, Camera.ViewportSize.Y * 0.5)
         if not IsMobile and UserInputService.MouseBehavior ~= Enum.MouseBehavior.LockCenter then
             local mPos = UserInputService:GetMouseLocation()
@@ -2896,7 +3618,6 @@ do
         local myHrp = GetRoot(char)
         local aliveInGame = (char and myHrp and hum and hum.Health > 0 and not IsOnTeamsMenu()) == true
 
-        -- Update FOV Circles
         SilentFOVFrame.Visible = aliveInGame and State.SilentAim and State.SilentAimShowFOV
         if SilentFOVFrame.Visible then
             SilentFOVFrame.Position = UDim2.fromOffset(screenCenter.X, screenCenter.Y)
@@ -2926,7 +3647,6 @@ do
             GunHook.CurrentSilentHitPos = nil
         end
 
-        -- Smooth Camera Aim Assist
         if aliveInGame and State.AimAssist then
             local holdingGun = IsHoldingFirearm()
             if holdingGun then
@@ -2950,7 +3670,6 @@ do
             end
         end
 
-        -- Triggerbot
         if aliveInGame and State.Triggerbot and not (State.Ragebot or State.AutoHvH) then
             if not GunHook.Ready then SetupGunControllerHooks() end
             if GunHook.Ready and GunHook.Shoot then
@@ -2978,7 +3697,6 @@ do
             end
         end
 
-        -- Auto-hide Holo-Shield HUD & Barrier when dead or on the Teams Menu!
         if not aliveInGame then
             if HoloShieldState.Model then DestroyHoloShield() end
             ShieldBarHolder.Visible = false
@@ -2986,7 +3704,6 @@ do
             return
         end
 
-        -- Update 5-Mode Holo-Shield Visual & Bottom Durability Bar
         if State.HoloShield then
             if State.ShieldMode == "FEGhost" then
                 if HoloShieldState.Model then DestroyHoloShield() end
@@ -3024,7 +3741,7 @@ do
                         local frac = clamp(HoloShieldState.HP / HoloShieldState.MaxHP, 0, 1)
                         ShieldBarFill.Size = UDim2.fromScale(frac, 1)
                         ShieldBarFill.BackgroundColor3 = Color3.fromRGB(0, 190, 240)
-                        ShieldBarText.Text = string.format("🛡️ SHIELD (%s): %d/%d", State.ShieldMode:upper(), round(HoloShieldState.HP), HoloShieldState.MaxHP)
+                        ShieldBarText.Text = string.format("🛡️ %s: %d/%d", State.ShieldMode:upper(), round(HoloShieldState.HP), HoloShieldState.MaxHP)
                     end
 
                     local look = Camera.CFrame.LookVector
@@ -3052,9 +3769,15 @@ do
         end
     end))
 
-    -- Heartbeat Loop
+    -- Unified Centralized Scheduler (Single Heartbeat + Clock-Gated 0.16s Utility Pass!)
     AddConnection(RunService.Heartbeat:Connect(function(dt)
         local now = os.clock()
+        if (now - App.Scheduler.PlayersUpdated) >= 0.45 or #App.Scheduler.Players == 0 then
+            App.Scheduler.Players = Players:GetPlayers()
+            App.Scheduler.PlayersUpdated = now
+        end
+        local playersSnapshot = App.Scheduler.Players
+
         local char = LocalPlayer.Character
         local hrp = GetRoot(char)
         local hum = GetHumanoid(char)
@@ -3216,21 +3939,29 @@ do
                 end
             end
 
-            -- 5-Mode Bullet Shield Physics (`Hybrid`, `UndergroundPeek`, `DesyncBox`, `RiotOnly`, `FEGhost`)
+            -- 5-Mode Bullet Shield + AutoHvH Reactive Evade
             if State.HoloShield and not hum.Sit and HoloShieldState.HP > 0 and now >= HoloShieldState.BrokenUntil then
                 local mode = State.ShieldMode or "Hybrid"
                 if (mode == "Hybrid" or mode == "RiotOnly") and State.ShieldAutoEquip and not HasEquippedRiotShield() then
-                    local bp = LocalPlayer:FindFirstChildOfClass("Backpack")
-                    local riot = bp and bp:FindFirstChild("Riot Shield")
-                    if riot and not IsComboRunning and not State.Ragebot and not State.AutoHvH then
-                        pcall(function() hum:EquipTool(riot) end)
+                    if App.ToolArbiter.CanUse("IdleShield", 1) then
+                        local bp = LocalPlayer:FindFirstChildOfClass("Backpack")
+                        local riot = bp and bp:FindFirstChild("Riot Shield")
+                        if riot and not IsComboRunning and not State.Ragebot and not State.AutoHvH then
+                            pcall(function() hum:EquipTool(riot) end)
+                        end
                     end
                 end
 
-                if State.ShieldAutoFaceShooter and not State.ShieldSpinBlock then
-                    local threatPart = GetBestCombatTarget({ use360 = true, wallcheck = false, range = 95 })
-                    if threatPart then
-                        hrp.CFrame = CFrame.lookAt(hrp.Position, Vector3.new(threatPart.Position.X, hrp.Position.Y, threatPart.Position.Z))
+                local reactiveUnderAttack = State.AutoHvH and State.AutoHvHReactiveEvade and HoloShieldState.LastAttacker and (now - HoloShieldState.LastAttackClock) < 1.6
+                if (State.ShieldAutoFaceShooter or reactiveUnderAttack) and not State.ShieldSpinBlock then
+                    local atkInfo = reactiveUnderAttack and App.WorldCache.Players[HoloShieldState.LastAttacker]
+                    local atkPos = (atkInfo and atkInfo.hrp and atkInfo.hrp.Parent and atkInfo.hrp.Position)
+                    if not atkPos then
+                        local threatPart = GetBestCombatTarget({ use360 = true, wallcheck = false, range = 95 })
+                        atkPos = threatPart and threatPart.Position
+                    end
+                    if atkPos then
+                        hrp.CFrame = CFrame.lookAt(hrp.Position, Vector3.new(atkPos.X, hrp.Position.Y, atkPos.Z))
                     end
                 end
 
@@ -3240,10 +3971,10 @@ do
                 end
 
                 local firingNow = ((now - GunHook.LastRageShotClock) < 0.09) or ((now - GunHook.LastComboShotClock) < 0.09) or FiringBusy
-                local useUnderground = (mode == "UndergroundPeek") or (mode == "Hybrid" and not HasEquippedRiotShield())
-                local useDesyncBox = (mode == "DesyncBox")
+                local useUnderground = (mode == "UndergroundPeek") or (mode == "Hybrid" and not HasEquippedRiotShield()) or reactiveUnderAttack
+                local useDesyncBox = (mode == "DesyncBox") and not useUnderground
 
-                if (useUnderground or useDesyncBox) and not (State.RagebotPeekShield and firingNow) and not IsGrabbingGuns then
+                if (useUnderground or useDesyncBox) and not (State.RagebotPeekShield and firingNow) and not IsGrabbingGuns and hrp.Position.Y > 10 then
                     HoloShieldState.SavedCF = hrp.CFrame
                     HoloShieldState.DesyncActive = true
                     if useUnderground then
@@ -3256,15 +3987,16 @@ do
                 end
             end
 
-            -- Anti-Ban Hardened Melee Kill Aura (forArrest = false so it never strikes non-Hostile Inmates)
+            -- Anti-Ban Hardened Melee Kill Aura
             local auraCooldown = State.AntiBanSafeMode and 0.32 or 0.20
             if State.KillAura and Remotes.MeleeEvent and (now - LastKillAuraTime) >= auraCooldown then
                 local maxRange = State.AntiBanSafeMode and math.min(State.KillAuraRange, 10) or State.KillAuraRange
                 local closestTarget, closestHrp, bestDist = nil, nil, maxRange
 
-                for _, plr in ipairs(Players:GetPlayers()) do
+                for _, plr in ipairs(playersSnapshot) do
                     if IsValidCombatTarget(plr, State.KillAuraGuardSafe, State.KillAuraWhitelist, false) then
-                        local tHrp = GetRoot(plr.Character)
+                        local pInfo = App.WorldCache.Players[plr]
+                        local tHrp = (pInfo and pInfo.hrp and pInfo.hrp.Parent and pInfo.hrp) or GetRoot(plr.Character)
                         if tHrp then
                             local d = (tHrp.Position - hrp.Position).Magnitude
                             if d <= bestDist then
@@ -3285,18 +4017,19 @@ do
                 end
             end
 
-            -- Auto-Taze Aura (Guards Taser Automation — forArrest = true so Trespassing Inmates can be tased!)
-            if State.AutoTaze and (now - LastAutoTazeTime) >= 1.15 then
+            -- Auto-Taze Aura (Guards Taser Automation with ToolArbiter coordination)
+            if State.AutoTaze and (now - LastAutoTazeTime) >= 1.15 and App.ToolArbiter.CanUse("AutoTaze", 3) then
                 local taser = HasWeapon("Taser")
                 local taserAmmo = taser and (taser:GetAttribute("Local_CurrentAmmo") or taser:GetAttribute("CurrentAmmo") or 1) or 0
                 if taser and taserAmmo > 0 then
                     local bestHead, bestDist = nil, 46
-                    for _, plr in ipairs(Players:GetPlayers()) do
+                    for _, plr in ipairs(playersSnapshot) do
                         if IsValidCombatTarget(plr, true, State.ArrestWhitelist, true) then
-                            local tChar = plr.Character
-                            local tHead = tChar and tChar:FindFirstChild("Head")
-                            local tHrp = GetRoot(tChar)
-                            if tHead and tHrp and not tChar:GetAttribute("Tased") then
+                            local pInfo = App.WorldCache.Players[plr]
+                            local tChar = (pInfo and pInfo.char) or plr.Character
+                            local tHead = (pInfo and pInfo.head) or (tChar and tChar:FindFirstChild("Head"))
+                            local tHrp = (pInfo and pInfo.hrp) or GetRoot(tChar)
+                            if tHead and tHrp and tChar and not tChar:GetAttribute("Tased") then
                                 local d = (tHrp.Position - hrp.Position).Magnitude
                                 if d < bestDist and HasLineOfSight(hrp.Position, tHead, tChar) then
                                     bestDist = d
@@ -3311,7 +4044,7 @@ do
                         task.spawn(function()
                             FireToolAtTarget(taser, bestHead, false, true, false)
                             task.wait(0.12)
-                            if prevTool and prevTool ~= taser and hum and hum.Health > 0 then
+                            if prevTool and prevTool ~= taser and hum and hum.Health > 0 and App.ToolArbiter.CanUse("AutoTaze", 3) then
                                 pcall(function() hum:EquipTool(prevTool) end)
                             end
                         end)
@@ -3319,7 +4052,7 @@ do
                 end
             end
 
-            -- Auto Arrest Aura (Guards only; checks Criminals + Hostile/Trespassing/Tased Inmates)
+            -- Auto Arrest Aura
             if State.AutoArrest and Remotes.ArrestPlayer and (now >= LastArrestTime) then
                 local canAttempt = true
                 if State.AutoArrestHandCheck then
@@ -3328,9 +4061,10 @@ do
                 end
 
                 if canAttempt and LocalPlayer.Team == Teams:FindFirstChild("Guards") then
-                    for _, plr in ipairs(Players:GetPlayers()) do
+                    for _, plr in ipairs(playersSnapshot) do
                         if IsValidCombatTarget(plr, true, State.ArrestWhitelist, true) then
-                            local tHrp = GetRoot(plr.Character)
+                            local pInfo = App.WorldCache.Players[plr]
+                            local tHrp = (pInfo and pInfo.hrp and pInfo.hrp.Parent and pInfo.hrp) or GetRoot(plr.Character)
                             local maxArRange = State.AntiBanSafeMode and math.min(State.AutoArrestRange, 10) or State.AutoArrestRange
                             if tHrp and (tHrp.Position - hrp.Position).Magnitude <= maxArRange then
                                 LastArrestTime = now + 0.5
@@ -3382,141 +4116,114 @@ do
             if UIRefs.FlyDownBtn then UIRefs.FlyDownBtn.Visible = false end
         end
 
-        -- Anti-Fling (Vehicles + High-Spinning Players)
+        -- Cached Anti-Fling (ZERO GetDescendants inside Heartbeat!)
         if State.AntiFling then
-            if Workspace:FindFirstChild("CarContainer") then
-                for _, part in ipairs(Workspace.CarContainer:GetDescendants()) do
-                    if part:IsA("BasePart") and part.CollisionGroup ~= "Wheels" and part.CanCollide then
-                        local mySeat = hum and hum.SeatPart
-                        if not mySeat or not part:IsDescendantOf(mySeat.Parent.Parent) then
+            local mySeat = hum and hum.SeatPart
+            local myCar = mySeat and mySeat:FindFirstAncestorOfClass("Model")
+            for carModel, entry in pairs(App.WorldCache.Cars) do
+                if carModel.Parent and carModel ~= myCar then
+                    for _, part in ipairs(entry.nonWheels) do
+                        if part and part.Parent and part.CanCollide then
                             part.CanCollide = false
                             part.CanTouch = false
                         end
                     end
                 end
             end
-            for _, plr in ipairs(Players:GetPlayers()) do
-                if plr ~= LocalPlayer and plr.Character then
-                    local tHrp = GetRoot(plr.Character)
-                    if tHrp and tHrp.AssemblyAngularVelocity.Magnitude > 85 then
-                        for _, desc in ipairs(plr.Character:GetDescendants()) do
-                            if desc:IsA("BasePart") and desc.CanCollide then desc.CanCollide = false end
+            for _, plr in ipairs(playersSnapshot) do
+                if plr ~= LocalPlayer then
+                    local info = App.WorldCache.Players[plr]
+                    local tHrp = info and info.hrp
+                    if tHrp and tHrp.Parent and tHrp.AssemblyAngularVelocity.Magnitude > 85 then
+                        for _, desc in ipairs(info.parts) do
+                            if desc and desc.Parent and desc.CanCollide then desc.CanCollide = false end
                         end
                     end
                 end
             end
         end
 
-        -- Vehicle Fling Exploit (Blocked in Anti-Ban Safe Mode)
-        if State.VehicleFling and not State.AntiBanSafeMode and Workspace:FindFirstChild("CarContainer") then
-            for _, desc in ipairs(Workspace.CarContainer:GetDescendants()) do
-                if desc:IsA("VehicleSeat") then
+        -- Vehicle Fling Exploit (Blocked in Anti-Ban Safe Mode; uses cached Cars!)
+        if State.VehicleFling and not State.AntiBanSafeMode then
+            for carModel, entry in pairs(App.WorldCache.Cars) do
+                local drv = entry.drv
+                if carModel.Parent and drv and drv.Parent then
                     local owned = true
                     pcall(function()
-                        if isnetworkowner then owned = isnetworkowner(desc) end
+                        if isnetworkowner then owned = isnetworkowner(drv) end
                     end)
                     if owned then
                         local targetPlr = (State.VehicleFlingTarget ~= "All") and Players:FindFirstChild(State.VehicleFlingTarget) or nil
                         if not targetPlr then
-                            for _, p in ipairs(Players:GetPlayers()) do
+                            for _, p in ipairs(playersSnapshot) do
                                 if IsValidCombatTarget(p, false, nil, false) then
-                                    local tHum = GetHumanoid(p.Character)
+                                    local pInfo = App.WorldCache.Players[p]
+                                    local tHum = (pInfo and pInfo.hum) or GetHumanoid(p.Character)
                                     if tHum and not tHum.Sit then targetPlr = p; break end
                                 end
                             end
                         end
-                        local tHrp = targetPlr and GetRoot(targetPlr.Character)
+                        local tInfo = targetPlr and App.WorldCache.Players[targetPlr]
+                        local tHrp = (tInfo and tInfo.hrp) or (targetPlr and GetRoot(targetPlr.Character))
                         if tHrp then
-                            desc.AssemblyLinearVelocity = Vector3.new(9500, 9500, 0)
-                            desc.CFrame = CFrame.new(tHrp.Position) * CFrame.new(-1.5, 0, -8)
+                            drv.AssemblyLinearVelocity = Vector3.new(9500, 9500, 0)
+                            drv.CFrame = CFrame.new(tHrp.Position) * CFrame.new(-1.5, 0, -8)
                         end
                     end
                 end
             end
         end
-    end))
 
-    -- Saved Door & Hitbox Data for Clean Restoration
-    local OriginalDoorData = setmetatable({}, { __mode = "k" })
-    local OriginalHitboxData = setmetatable({}, { __mode = "k" })
-
-    function Core.RestoreAllHitboxes()
-        for hrp, orig in pairs(OriginalHitboxData) do
-            if hrp and hrp.Parent then
-                pcall(function()
-                    hrp.Size = orig.Size
-                    hrp.CanCollide = orig.CanCollide
-                    hrp.Transparency = 1
-                end)
-            end
-        end
-        table.clear(OriginalHitboxData)
-    end
-
-    function Core.RestoreAllDoors()
-        for part, orig in pairs(OriginalDoorData) do
-            if part and part.Parent then
-                pcall(function()
-                    part.CanCollide = orig.CanCollide
-                    part.Transparency = orig.Transparency
-                end)
-            end
-        end
-        table.clear(OriginalDoorData)
-    end
-
-    -- Secondary 0.18s Utility Loop
-    task.spawn(function()
-        while task.wait(0.18) do
-            if not Env.PrisonLife2026Running then break end
+        -- Clock-Gated 0.16s Utility & Visuals Slice (Consolidated into Single Scheduler!)
+        if (now - LastUtilityTick) >= 0.16 then
+            LastUtilityTick = now
 
             pcall(Core.UpdatePlayerESP)
             pcall(Core.EvaluateAnomalies)
 
-            local myChar = LocalPlayer.Character
-            local myHrp = GetRoot(myChar)
-            local myHum = GetHumanoid(myChar)
+            for _, plr in ipairs(playersSnapshot) do
+                if plr ~= LocalPlayer then
+                    local info = App.WorldCache.Players[plr]
+                    local tChar = (info and info.char and info.char.Parent and info.char) or plr.Character
+                    if tChar then
+                        local tHrp = (info and info.hrp and info.hrp.Parent and info.hrp) or GetRoot(tChar)
+                        local tHum = (info and info.hum and info.hum.Parent and info.hum) or GetHumanoid(tChar)
 
-            for _, plr in ipairs(Players:GetPlayers()) do
-                if plr ~= LocalPlayer and plr.Character then
-                    local tChar = plr.Character
-                    local tHrp = GetRoot(tChar)
-                    local tHum = GetHumanoid(tChar)
-
-                    if tHrp then
-                        if State.ExpandHitbox and IsValidCombatTarget(plr, State.SilentAimHostileCheck, nil, false) then
-                            if not OriginalHitboxData[tHrp] then
-                                OriginalHitboxData[tHrp] = { Size = tHrp.Size, CanCollide = tHrp.CanCollide }
+                        if tHrp then
+                            if State.ExpandHitbox and IsValidCombatTarget(plr, State.SilentAimHostileCheck, nil, false) then
+                                if not OriginalHitboxData[tHrp] then
+                                    OriginalHitboxData[tHrp] = { Size = tHrp.Size, CanCollide = tHrp.CanCollide }
+                                end
+                                local boxSz = State.AntiBanSafeMode and math.min(State.HitboxSize, 12) or State.HitboxSize
+                                tHrp.Size = Vector3.new(boxSz, boxSz, boxSz)
+                                tHrp.Transparency = 1
+                                tHrp.CanCollide = false
+                            elseif OriginalHitboxData[tHrp] then
+                                local orig = OriginalHitboxData[tHrp]
+                                tHrp.Size = orig.Size
+                                tHrp.CanCollide = orig.CanCollide
+                                tHrp.Transparency = 1
+                                OriginalHitboxData[tHrp] = nil
+                            elseif tHrp.Transparency < 1 then
+                                tHrp.Transparency = 1
                             end
-                            local boxSz = State.AntiBanSafeMode and math.min(State.HitboxSize, 12) or State.HitboxSize
-                            tHrp.Size = Vector3.new(boxSz, boxSz, boxSz)
-                            tHrp.Transparency = 1
-                            tHrp.CanCollide = false
-                        elseif OriginalHitboxData[tHrp] then
-                            local orig = OriginalHitboxData[tHrp]
-                            tHrp.Size = orig.Size
-                            tHrp.CanCollide = orig.CanCollide
-                            tHrp.Transparency = 1
-                            OriginalHitboxData[tHrp] = nil
-                        elseif tHrp.Transparency < 1 then
-                            tHrp.Transparency = 1
                         end
-                    end
 
-                    local shield = tChar:FindFirstChild("RiotShieldPart")
-                    if shield and shield:IsA("BasePart") then
-                        shield.CanQuery = not State.AntiRiotShield
-                    end
+                        local shield = (info and info.riotShield and info.riotShield.Parent and info.riotShield) or tChar:FindFirstChild("RiotShieldPart")
+                        if shield and shield:IsA("BasePart") then
+                            shield.CanQuery = not State.AntiRiotShield
+                        end
 
-                    if State.AntiInvisible and tHum then
-                        local animator = tHum:FindFirstChildOfClass("Animator")
-                        if animator then
-                            for _, track in ipairs(animator:GetPlayingAnimationTracks()) do
-                                local id = track.Animation and track.Animation.AnimationId or ""
-                                local frozenExploit = (track.Speed == 0 and track.TimePosition > 0.2 and tHum.MoveDirection.Magnitude > 0.15)
-                                if id:find("215384594") or id:find("18665825805") or id:find("181525546") or frozenExploit then
-                                    track:AdjustWeight(0, 0)
-                                    track:Stop(0)
+                        if State.AntiInvisible and tHum then
+                            local animator = (info and info.animator and info.animator.Parent and info.animator) or tHum:FindFirstChildOfClass("Animator")
+                            if animator then
+                                for _, track in ipairs(animator:GetPlayingAnimationTracks()) do
+                                    local id = track.Animation and track.Animation.AnimationId or ""
+                                    local frozenExploit = (track.Speed == 0 and track.TimePosition > 0.2 and tHum.MoveDirection.Magnitude > 0.15)
+                                    if id:find("215384594") or id:find("18665825805") or id:find("181525546") or frozenExploit then
+                                        track:AdjustWeight(0, 0)
+                                        track:Stop(0)
+                                    end
                                 end
                             end
                         end
@@ -3524,68 +4231,76 @@ do
                 end
             end
 
-            -- Auto Heal
-            if State.AutoHeal and myChar and myHum and myHum.Health > 0 and myHum.Health <= State.AutoHealThreshold and Remotes.EatFood then
-                local bp = LocalPlayer:FindFirstChildOfClass("Backpack")
-                if bp then
-                    for _, foodName in ipairs({ "Breakfast", "Lunch", "Dinner", "Donut", "Soda" }) do
-                        local food = bp:FindFirstChild(foodName) or myChar:FindFirstChild(foodName)
-                        if food and (os.clock() - (food:GetAttribute("Client_LastConsumedAt") or 0)) >= 3.1 then
-                            local prevTool = myChar:FindFirstChildOfClass("Tool")
-                            myHum:EquipTool(food)
-                            food:SetAttribute("Client_LastConsumedAt", os.clock())
-                            Remotes.EatFood:FireServer()
-                            if prevTool and prevTool ~= food then myHum:EquipTool(prevTool)
-                            else myHum:UnequipTools() end
-                            break
+            -- Auto Heal (Uses ToolArbiter)
+            if State.AutoHeal and char and hum and hum.Health > 0 and hum.Health <= State.AutoHealThreshold and Remotes.EatFood then
+                if App.ToolArbiter.Acquire("AutoHeal", 2, 0.2) then
+                    local bp = LocalPlayer:FindFirstChildOfClass("Backpack")
+                    if bp then
+                        for _, foodName in ipairs({ "Breakfast", "Lunch", "Dinner", "Donut", "Soda" }) do
+                            local food = bp:FindFirstChild(foodName) or char:FindFirstChild(foodName)
+                            if food and (now - (food:GetAttribute("Client_LastConsumedAt") or 0)) >= 3.1 then
+                                local prevTool = char:FindFirstChildOfClass("Tool")
+                                hum:EquipTool(food)
+                                food:SetAttribute("Client_LastConsumedAt", now)
+                                Remotes.EatFood:FireServer()
+                                if prevTool and prevTool ~= food then hum:EquipTool(prevTool)
+                                else hum:UnequipTools() end
+                                break
+                            end
                         end
                     end
+                    App.ToolArbiter.Release("AutoHeal")
                 end
             end
 
-            -- Auto Pickup Dropped Keycards & Weapons
-            if State.AutoPickupDropped and myHrp and Remotes.GiverPressed then
-                for _, child in ipairs(Workspace:GetChildren()) do
-                    if child:IsA("Model") and child:GetAttribute("ToolName") then
-                        if not HasWeapon(child:GetAttribute("ToolName")) then
+            -- Auto Pickup Dropped Keycards & Weapons (Uses WorldCache.Dropped — ZERO Workspace scan!)
+            if State.AutoPickupDropped and hrp and Remotes.GiverPressed then
+                for child in pairs(App.WorldCache.Dropped) do
+                    if child and child.Parent then
+                        local tName = child:GetAttribute("ToolName")
+                        if tName and not HasWeapon(tName) then
                             local okP, piv = pcall(function() return child:GetPivot() end)
-                            if okP and piv and (piv.Position - myHrp.Position).Magnitude <= 11.5 then
+                            if okP and piv and (piv.Position - hrp.Position).Magnitude <= 11.5 then
                                 Remotes.GiverPressed:FireServer(child)
                             end
                         end
+                    else
+                        App.WorldCache.Dropped[child] = nil
                     end
                 end
             end
 
             -- Auto Armor
-            if State.AutoArmor and myHrp and myHum and not HasTargetArmor(myChar) and Remotes.InteractWithItem then
+            if State.AutoArmor and hrp and hum and not HasTargetArmor(char) and Remotes.InteractWithItem then
                 local clothes = Workspace:FindFirstChild("Prison_ITEMS") and Workspace.Prison_ITEMS:FindFirstChild("clothes")
                 if clothes then
                     for _, item in ipairs(clothes:GetChildren()) do
                         local part = item:FindFirstChildWhichIsA("BasePart")
-                        if part and (part.Position - myHrp.Position).Magnitude <= 12 then
+                        if part and (part.Position - hrp.Position).Magnitude <= 12 then
                             pcall(function() Remotes.InteractWithItem:InvokeServer(part) end)
                         end
                     end
                 end
             end
 
-            -- Auto Detonate C4
-            if State.AutoDetonateC4 and myHrp and Remotes.C4Folder then
+            -- Auto Detonate C4 (Uses ToolArbiter)
+            if State.AutoDetonateC4 and hrp and Remotes.C4Folder and App.ToolArbiter.CanUse("AutoC4", 2) then
                 local activateRemote = Remotes.C4Folder:FindFirstChild("ActivateC4")
                 if activateRemote then
                     for _, c4 in ipairs(CollectionService:GetTagged("C4")) do
                         if c4:GetAttribute("UserId") == LocalPlayer.UserId and c4:IsA("BasePart") then
-                            for _, plr in ipairs(Players:GetPlayers()) do
+                            for _, plr in ipairs(playersSnapshot) do
                                 if IsValidCombatTarget(plr, false, nil, false) then
-                                    local tHrp = GetRoot(plr.Character)
-                                    if tHrp and (tHrp.Position - c4.Position).Magnitude <= 22 and (myHrp.Position - c4.Position).Magnitude > 26 then
+                                    local pInfo = App.WorldCache.Players[plr]
+                                    local tHrp = (pInfo and pInfo.hrp) or GetRoot(plr.Character)
+                                    if tHrp and (tHrp.Position - c4.Position).Magnitude <= 22 and (hrp.Position - c4.Position).Magnitude > 26 then
                                         local c4Tool = HasWeapon("C4 Explosive")
-                                        if c4Tool and myHum then
-                                            local prev = myChar:FindFirstChildOfClass("Tool")
-                                            myHum:EquipTool(c4Tool)
+                                        if c4Tool and hum and App.ToolArbiter.Acquire("AutoC4", 2, 0.25) then
+                                            local prev = char:FindFirstChildOfClass("Tool")
+                                            hum:EquipTool(c4Tool)
                                             task.spawn(function() pcall(function() activateRemote:InvokeServer() end) end)
-                                            if prev then myHum:EquipTool(prev) end
+                                            if prev then hum:EquipTool(prev) end
+                                            App.ToolArbiter.Release("AutoC4")
                                         end
                                         break
                                     end
@@ -3596,10 +4311,10 @@ do
                 end
             end
 
-            -- Open All Doors
-            if State.OpenAllDoors and Workspace:FindFirstChild("Doors") then
-                for _, part in ipairs(Workspace.Doors:GetDescendants()) do
-                    if part:IsA("BasePart") and part.CanCollide then
+            -- Cached Open All Doors (ZERO Doors:GetDescendants() in loop!)
+            if State.OpenAllDoors then
+                for _, part in ipairs(App.WorldCache.Doors) do
+                    if part and part.Parent and part.CanCollide then
                         if not OriginalDoorData[part] then
                             OriginalDoorData[part] = { CanCollide = part.CanCollide, Transparency = part.Transparency }
                         end
@@ -3612,22 +4327,22 @@ do
             end
 
             -- Auto Reload at 0 Ammo + Optional Hot-Swap
-            if State.AutoReload and myChar and myHum and myHum.Health > 0 then
+            if State.AutoReload and char and hum and hum.Health > 0 then
                 local holdingGun, eqTool = IsHoldingFirearm()
                 if holdingGun and eqTool then
                     local curAmmo = eqTool:GetAttribute("Local_CurrentAmmo") or eqTool:GetAttribute("CurrentAmmo") or 1
                     if curAmmo <= 0 and (eqTool:GetAttribute("Local_ReloadSession") or 0) <= 0 then
                         if not GunHook.Ready then SetupGunControllerHooks() end
                         if GunHook.Reload then task.spawn(GunHook.Reload) end
-                        if State.AutoReloadHotSwap then
+                        if State.AutoReloadHotSwap and App.ToolArbiter.CanUse("AutoReload", 1) then
                             local loaded = GetOwnedLoadedGuns()
-                            if loaded[1] and loaded[1] ~= eqTool then myHum:EquipTool(loaded[1]) end
+                            if loaded[1] and loaded[1] ~= eqTool then hum:EquipTool(loaded[1]) end
                         end
                     end
                 end
             end
         end
-    end)
+    end))
 
     AddConnection(UserInputService.JumpRequest:Connect(function()
         if State.InfiniteJump then
@@ -3880,6 +4595,298 @@ do
             TeleportService:Teleport(game.PlaceId, LocalPlayer)
         end)
     end
+
+    function Core.SyncAfterStateLoad()
+        ApplyGunModsAll()
+        if State.HoloShield then CreateHoloShield() else DestroyHoloShield() end
+        if not State.ExpandHitbox and Core.RestoreAllHitboxes then Core.RestoreAllHitboxes() end
+        if not State.OpenAllDoors and Core.RestoreAllDoors then Core.RestoreAllDoors() end
+        if not State.Fly and Core.CleanupCharFly then Core.CleanupCharFly() end
+        if Core.ApplyFenceGodmode then Core.ApplyFenceGodmode(State.FenceGodmode) end
+        if Core.SetFEInvisibleState then Core.SetFEInvisibleState(State.FEInvisible, false) end
+        if UIRefs.ComboTopLeftBtn then UIRefs.ComboTopLeftBtn.Visible = State.ShowComboButton end
+        if UIRefs.CmdTogglePill then UIRefs.CmdTogglePill.Visible = State.ShowCommandPill end
+        if not State.ESP and Core.ESPObjects then
+            for plr in pairs(Core.ESPObjects) do Core.RemovePlayerESP(plr) end
+        end
+    end
+end
+
+-- ============================================================================
+-- // SECTION 12B: EMBEDDED JSON PERSISTENCE & CONFIG PROFILE ENGINE
+-- ============================================================================
+do
+    local P = App.Persistence
+    local RootDir = "PrisonLife2026Hub"
+    local ProfilesDir = RootDir .. "/profiles"
+    local MetaFile = RootDir .. "/meta.json"
+    local VolatileKeys = {
+        KillAuraWhitelist = true,
+        LoopKillTargets = true,
+        ArrestWhitelist = true,
+    }
+
+    local function HasFS()
+        return type(writefile) == "function" and type(readfile) == "function"
+    end
+
+    local function EnsureDirs()
+        if type(isfolder) ~= "function" or type(makefolder) ~= "function" then return end
+        pcall(function()
+            if not isfolder(RootDir) then makefolder(RootDir) end
+            if not isfolder(ProfilesDir) then makefolder(ProfilesDir) end
+        end)
+    end
+
+    -- Pure-Lua JSON Encoder / Recursive-Descent Decoder Fallback
+    local function escapeStr(s)
+        s = tostring(s):gsub("\\", "\\\\"):gsub('"', '\\"'):gsub("\n", "\\n"):gsub("\r", "\\r"):gsub("\t", "\\t")
+        return '"' .. s .. '"'
+    end
+
+    local function PureEncode(val)
+        local t = type(val)
+        if t == "nil" then return "null"
+        elseif t == "boolean" then return val and "true" or "false"
+        elseif t == "number" then
+            if val ~= val or val == math.huge or val == -math.huge then return "0" end
+            return tostring(val)
+        elseif t == "string" then return escapeStr(val)
+        elseif t == "table" then
+            local maxIdx, count = 0, 0
+            for k in pairs(val) do
+                count = count + 1
+                if type(k) == "number" and k >= 1 and math.floor(k) == k then
+                    if k > maxIdx then maxIdx = k end
+                else
+                    maxIdx = -1
+                end
+            end
+            if maxIdx == count and count > 0 then
+                local parts = {}
+                for i = 1, count do parts[i] = PureEncode(val[i]) end
+                return "[" .. table.concat(parts, ",") .. "]"
+            else
+                local parts = {}
+                for k, v in pairs(val) do
+                    if type(v) ~= "function" and type(v) ~= "userdata" and type(v) ~= "thread" then
+                        table.insert(parts, escapeStr(k) .. ":" .. PureEncode(v))
+                    end
+                end
+                table.sort(parts)
+                return "{" .. table.concat(parts, ",") .. "}"
+            end
+        end
+        return "null"
+    end
+
+    local function PureDecode(str)
+        if type(str) ~= "string" then return nil end
+        local pos, len = 1, #str
+        local function skipWS()
+            local _, nxt = str:find("^[ \t\r\n]+", pos)
+            if nxt then pos = nxt + 1 end
+        end
+        local parseVal
+        local function parseStr()
+            pos = pos + 1
+            local out = {}
+            while pos <= len do
+                local c = str:sub(pos, pos)
+                if c == '"' then pos = pos + 1; return table.concat(out)
+                elseif c == "\\" then
+                    local nx = str:sub(pos + 1, pos + 1)
+                    local map = { ['"'] = '"', ['\\'] = '\\', n = "\n", r = "\r", t = "\t", ['/'] = '/' }
+                    table.insert(out, map[nx] or nx)
+                    pos = pos + 2
+                else
+                    table.insert(out, c)
+                    pos = pos + 1
+                end
+            end
+            return table.concat(out)
+        end
+        parseVal = function()
+            skipWS()
+            local c = str:sub(pos, pos)
+            if c == '"' then return parseStr()
+            elseif c == "{" then
+                pos = pos + 1
+                local obj = {}
+                skipWS()
+                if str:sub(pos, pos) == "}" then pos = pos + 1; return obj end
+                while pos <= len do
+                    skipWS()
+                    if str:sub(pos, pos) ~= '"' then break end
+                    local k = parseStr()
+                    skipWS()
+                    if str:sub(pos, pos) == ":" then pos = pos + 1 end
+                    obj[k] = parseVal()
+                    skipWS()
+                    local sep = str:sub(pos, pos)
+                    if sep == "}" then pos = pos + 1; return obj end
+                    if sep == "," then pos = pos + 1 else break end
+                end
+                return obj
+            elseif c == "[" then
+                pos = pos + 1
+                local arr = {}
+                skipWS()
+                if str:sub(pos, pos) == "]" then pos = pos + 1; return arr end
+                while pos <= len do
+                    table.insert(arr, parseVal())
+                    skipWS()
+                    local sep = str:sub(pos, pos)
+                    if sep == "]" then pos = pos + 1; return arr end
+                    if sep == "," then pos = pos + 1 else break end
+                end
+                return arr
+            elseif str:sub(pos, pos + 3) == "true" then pos = pos + 4; return true
+            elseif str:sub(pos, pos + 4) == "false" then pos = pos + 5; return false
+            elseif str:sub(pos, pos + 3) == "null" then pos = pos + 4; return nil
+            else
+                local numStr = str:match("^%-?%d+%.?%d*[eE]?[%+%-]?%d*", pos)
+                if numStr and #numStr > 0 then
+                    pos = pos + #numStr
+                    return tonumber(numStr)
+                end
+                pos = pos + 1
+                return nil
+            end
+        end
+        local ok, res = pcall(parseVal)
+        return ok and res or nil
+    end
+
+    function P.EncodeJSON(tbl)
+        local ok, res = pcall(function() return HttpService:JSONEncode(tbl) end)
+        if ok and type(res) == "string" and #res > 0 then return res end
+        return PureEncode(tbl)
+    end
+
+    function P.DecodeJSON(str)
+        if type(str) ~= "string" or str == "" then return nil end
+        local ok, res = pcall(function() return HttpService:JSONDecode(str) end)
+        if ok and type(res) == "table" then return res end
+        local pRes = PureDecode(str)
+        return type(pRes) == "table" and pRes or nil
+    end
+
+    local function SanitizeName(name)
+        local s = Trim(tostring(name or "default")):gsub("[^%w%._%-]", "_")
+        return (s == "" and "default") or s
+    end
+
+    function P.SaveMeta(autoLoad, defaultName)
+        if not HasFS() then return false end
+        EnsureDirs()
+        local raw = P.EncodeJSON({ autoLoad = (autoLoad == true), defaultProfile = SanitizeName(defaultName or "default") })
+        return pcall(writefile, MetaFile, raw)
+    end
+
+    function P.LoadMeta()
+        if not HasFS() or type(isfile) ~= "function" then return { autoLoad = true, defaultProfile = "default" } end
+        local okE, exists = pcall(isfile, MetaFile)
+        if okE and exists then
+            local okR, raw = pcall(readfile, MetaFile)
+            local dec = okR and P.DecodeJSON(raw)
+            if type(dec) == "table" then
+                return {
+                    autoLoad = (dec.autoLoad ~= false),
+                    defaultProfile = SanitizeName(dec.defaultProfile or "default"),
+                }
+            end
+        end
+        return { autoLoad = true, defaultProfile = "default" }
+    end
+
+    function P.ListProfiles()
+        local names = { "default" }
+        local seen = { default = true }
+        if type(listfiles) ~= "function" then return names end
+        EnsureDirs()
+        local ok, files = pcall(listfiles, ProfilesDir)
+        if ok and type(files) == "table" then
+            for _, fPath in ipairs(files) do
+                local n = tostring(fPath):match("([^/\\]+)%.json$")
+                if n and not seen[n] then
+                    seen[n] = true
+                    table.insert(names, n)
+                end
+            end
+        end
+        table.sort(names)
+        return names
+    end
+
+    function P.SaveProfile(name, silent)
+        if not HasFS() then
+            if not silent then Notify("Config", "Executor filesystem API unavailable.", 2.5) end
+            return false
+        end
+        EnsureDirs()
+        local clean = SanitizeName(name)
+        local snapshot = {}
+        for k, v in pairs(State) do
+            if not VolatileKeys[k] and type(v) ~= "function" and type(v) ~= "userdata" then
+                snapshot[k] = v
+            end
+        end
+        local path = ProfilesDir .. "/" .. clean .. ".json"
+        local ok = pcall(writefile, path, P.EncodeJSON(snapshot))
+        if not silent then
+            Notify("Config", ok and ("Saved profile '" .. clean .. "'!") or "Failed to write config.", 2.4)
+        end
+        return ok
+    end
+
+    function P.LoadProfile(name, silent)
+        if not HasFS() then return false end
+        local clean = SanitizeName(name)
+        local path = ProfilesDir .. "/" .. clean .. ".json"
+        if type(isfile) == "function" then
+            local okE, ex = pcall(isfile, path)
+            if not okE or not ex then
+                if not silent then Notify("Config", "Profile '" .. clean .. "' not found.", 2.2) end
+                return false
+            end
+        end
+        local okR, raw = pcall(readfile, path)
+        local dec = okR and P.DecodeJSON(raw)
+        if type(dec) ~= "table" then
+            if not silent then Notify("Config", "Corrupted JSON in '" .. clean .. "'.", 2.2) end
+            return false
+        end
+        for k, v in pairs(dec) do
+            if not VolatileKeys[k] and State[k] ~= nil and type(v) == type(State[k]) then
+                State[k] = v
+            end
+        end
+        Core.SyncAfterStateLoad()
+        if not silent then
+            Notify("Config", "Loaded profile '" .. clean .. "'!", 2.4)
+        end
+        return true
+    end
+
+    function P.DeleteProfile(name, silent)
+        local clean = SanitizeName(name)
+        if type(delfile) ~= "function" then return false end
+        local path = ProfilesDir .. "/" .. clean .. ".json"
+        local ok = pcall(delfile, path)
+        if not silent then
+            Notify("Config", ok and ("Deleted profile '" .. clean .. "'.") or "Profile could not be deleted.", 2.2)
+        end
+        return ok
+    end
+
+    function P.TryAutoLoad()
+        local meta = P.LoadMeta()
+        State.ConfigAutoLoad = meta.autoLoad
+        if meta.autoLoad then
+            P.LoadProfile(meta.defaultProfile or "default", true)
+        end
+    end
 end
 
 -- ============================================================================
@@ -3893,6 +4900,8 @@ do
         m9 = "M9", pistol = "M9",
         mp5 = "MP5", smg = "MP5",
         fal = "FAL",
+        m700 = "M700", sniper = "M700", awp = "M700",
+        revolver = "Revolver", rev = "Revolver",
         riot = "Riot Shield", shield = "Riot Shield",
         hammer = "Hammer", knife = "Crude Knife", crudeknife = "Crude Knife",
     }
@@ -3904,8 +4913,10 @@ do
         { cmd = ".void <plr>", desc = "Drop target into void via Saved Car" },
         { cmd = ".fling <plr>", desc = "Car-fling target player" },
         { cmd = ".autohvh [on|off]", desc = "Full Hack-vs-Hack suite (Hotkey: H)" },
+        { cmd = ".evade [on|off]", desc = "Reactive Auto-Evade vs incoming shooters" },
         { cmd = ".wheelaura [on|off]", desc = "Neon particle aura on vehicle wheels" },
         { cmd = ".hammer / .knife", desc = "Instant grab Hammer or Crude Knife" },
+        { cmd = ".m700 / .revolver", desc = "Grab Sniper Update M700 or Revolver" },
         { cmd = ".guns / .gun <name>", desc = "Grab loadout or specific firearm" },
         { cmd = ".loadout <cop|crim|all>", desc = "Grab role weapon kit" },
         { cmd = ".combo1 / .loopcombo", desc = "Multi-gun burst (Hotkey: X)" },
@@ -3921,6 +4932,7 @@ do
         { cmd = ".noclip / .opendoors / .fencegod", desc = "Noclip, Doors & Fence Godmode" },
         { cmd = ".goto <loc|plr> / .view <plr>", desc = "Teleport or Spectate player" },
         { cmd = ".preset <safe|legit|rage|hvh>", desc = "Load configuration preset" },
+        { cmd = ".savecfg [name] / .loadcfg [name]", desc = "Save or load JSON config profile" },
         { cmd = ".rejoin / .serverhop", desc = "Rejoin or hop server" },
     }
 
@@ -3975,6 +4987,30 @@ do
             task.spawn(function() GrabWeapons({ "Hammer" }) end)
         elseif cmd == "knife" or cmd == "getknife" or cmd == "crudeknife" or cmd == "getmethod" then
             task.spawn(function() GrabWeapons({ "Crude Knife", "Hammer" }) end)
+        elseif cmd == "m700" or cmd == "sniper" then
+            task.spawn(function() GrabWeapons({ "M700" }) end)
+        elseif cmd == "revolver" or cmd == "rev" then
+            task.spawn(function() GrabWeapons({ "Revolver" }) end)
+        elseif cmd == "evade" or cmd == "reactiveevade" then
+            State.AutoHvHReactiveEvade = ParseToggleArg(arg1, State.AutoHvHReactiveEvade)
+            Notify("AutoHvH Evade", "Reactive Shooter Evade: " .. (State.AutoHvHReactiveEvade and "ON" or "OFF"), 2)
+        elseif cmd == "savecfg" or cmd == "saveprofile" then
+            App.Persistence.SaveProfile(rest ~= "" and rest or "default", false)
+        elseif cmd == "loadcfg" or cmd == "loadprofile" then
+            App.Persistence.LoadProfile(rest ~= "" and rest or "default", false)
+        elseif cmd == "delcfg" or cmd == "delprofile" then
+            App.Persistence.DeleteProfile(rest ~= "" and rest or "default", false)
+        elseif cmd == "configs" or cmd == "profiles" then
+            Notify("Config Profiles", table.concat(App.Persistence.ListProfiles(), ", "), 3.2)
+        elseif cmd == "autoload" then
+            State.ConfigAutoLoad = ParseToggleArg(arg1, State.ConfigAutoLoad)
+            App.Persistence.SaveMeta(State.ConfigAutoLoad, "default")
+            Notify("Config Auto-Load", State.ConfigAutoLoad and "ON (default)" or "OFF", 2)
+        elseif cmd == "detaillod" or cmd == "lod" then
+            if tonumber(arg1) then
+                State.ESPDetailDistance = clamp(tonumber(arg1), 40, 600)
+                Notify("ESP LOD", "Detail distance: " .. tostring(State.ESPDetailDistance) .. "m", 2)
+            end
         -- Weapons & Combat Commands
         elseif cmd == "guns" or cmd == "getguns" or cmd == "grabguns" then
             task.spawn(function() GrabWeapons(State.AutoGetGunsSelection) end)
@@ -4350,10 +5386,10 @@ Env.PrisonLife2026Running = true
 do
     if WindUI then
         local Window = WindUI:CreateWindow({
-            Title = "Prison Life • 2026 Hub (v4.0 KX Pro)",
+            Title = "Prison Life • 2026 Hub (v5.0 Architect Pro)",
             Icon = "shield",
-            Author = "Clutter-Free KX Features • Anti-Ban Hardened",
-            Folder = "PrisonLife2026HubV4",
+            Author = "Clutter-Free KX • Pooled Scheduler & JSON Configs",
+            Folder = "PrisonLife2026HubV5",
             Size = UDim2.fromOffset(590, 440),
             Transparent = true,
             Theme = "Dark",
@@ -4481,6 +5517,18 @@ do
                     SetupGunControllerHooks()
                 end
             end,
+        })
+        TabCombat:Toggle({
+            Title = "Prioritize Exploiters & Cheaters First",
+            Desc = "Targets Anomaly-flagged speed/TP/spin/invis players first in HvH",
+            Value = true,
+            Callback = function(v) State.HvHTargetExploitersFirst = v end,
+        })
+        TabCombat:Toggle({
+            Title = "Reactive Auto-Evade Incoming Shooters",
+            Desc = "Automatically faces & ducks attackers detected via ReplicateEvent",
+            Value = true,
+            Callback = function(v) State.AutoHvHReactiveEvade = v end,
         })
         TabCombat:Toggle({
             Title = "360° Ragebot (Auto-Shoot Hostile Targets)",
@@ -4648,6 +5696,14 @@ do
             Callback = function() task.spawn(function() GrabWeapons({ "MP5" }) end) end,
         })
         TabWeapons:Button({
+            Title = "Grab M700 (Sniper Update)",
+            Callback = function() task.spawn(function() GrabWeapons({ "M700" }) end) end,
+        })
+        TabWeapons:Button({
+            Title = "Grab Revolver (Sniper Update)",
+            Callback = function() task.spawn(function() GrabWeapons({ "Revolver" }) end) end,
+        })
+        TabWeapons:Button({
             Title = "Grab Hammer & Crude Knife (.hammer / .knife)",
             Callback = function() task.spawn(function() GrabWeapons({ "Hammer", "Crude Knife" }) end) end,
         })
@@ -4677,6 +5733,11 @@ do
             Title = "Zero Bullet Spread & Force Full Auto",
             Value = true,
             Callback = function(v) State.GunNoSpread = v; State.GunFullAuto = v; ApplyGunModsAll() end,
+        })
+        TabWeapons:Toggle({
+            Title = "Zero Sniper / Taser ChargeTime Delay",
+            Value = true,
+            Callback = function(v) State.GunZeroChargeTime = v; ApplyGunModsAll() end,
         })
         TabWeapons:Toggle({
             Title = "Auto Reload at 0 Ammo",
@@ -4752,17 +5813,7 @@ do
             Title = "Electric Fence Godmode",
             Value = true,
             Callback = function(v)
-                State.FenceGodmode = v
-                pcall(function()
-                    local fences = Workspace:FindFirstChild("Prison_Fences")
-                    if fences then
-                        for _, desc in ipairs(fences:GetDescendants()) do
-                            if desc:IsA("BasePart") and desc:FindFirstChildOfClass("TouchTransmitter") then
-                                desc.CanTouch = not v
-                            end
-                        end
-                    end
-                end)
+                Core.ApplyFenceGodmode(v)
             end,
         })
         TabPrison:Toggle({
@@ -4955,6 +6006,12 @@ do
             Value = false,
             Callback = function(v) State.ESPHideTeam = v end,
         })
+        TabVisuals:Slider({
+            Title = "ESP Detail LOD Distance (m)",
+            Step = 10,
+            Value = { Min = 40, Max = 350, Default = 140 },
+            Callback = function(v) State.ESPDetailDistance = tonumber(v) or 140 end,
+        })
         TabVisuals:Toggle({
             Title = "3D Neon Bullet Tracers",
             Value = true,
@@ -5071,6 +6128,65 @@ do
         })
         TabVisuals:Button({ Title = "Rejoin Current Server (.rj)", Callback = Core.RejoinServer })
         TabVisuals:Button({ Title = "Server Hop (.shop)", Callback = Core.ServerHop })
+
+        TabVisuals:Section({ Title = "📁 JSON Config Profiles (.savecfg / .loadcfg)" })
+        local activeCfgName = "default"
+        local cfgDropdown = TabVisuals:Dropdown({
+            Title = "Select Config Profile",
+            Values = App.Persistence.ListProfiles(),
+            Value = "default",
+            Callback = function(v)
+                local p = NormalizeDropdownValue(v)
+                if p ~= "" then activeCfgName = p end
+            end,
+        })
+        if TabVisuals.Input then
+            pcall(function()
+                TabVisuals:Input({
+                    Title = "Custom Profile Name",
+                    Placeholder = "default (or type custom name)",
+                    Callback = function(v)
+                        local clean = Trim(tostring(v or ""))
+                        if clean ~= "" then activeCfgName = clean end
+                    end,
+                })
+            end)
+        end
+        local function RefreshProfileList()
+            pcall(function()
+                if cfgDropdown and cfgDropdown.Refresh then
+                    cfgDropdown:Refresh(App.Persistence.ListProfiles())
+                end
+            end)
+        end
+        TabVisuals:Button({
+            Title = "Save Current Settings to Profile",
+            Callback = function()
+                App.Persistence.SaveProfile(activeCfgName, false)
+                RefreshProfileList()
+            end,
+        })
+        TabVisuals:Button({
+            Title = "Load Selected Profile",
+            Callback = function()
+                App.Persistence.LoadProfile(activeCfgName, false)
+            end,
+        })
+        TabVisuals:Button({
+            Title = "Delete Selected Profile",
+            Callback = function()
+                App.Persistence.DeleteProfile(activeCfgName, false)
+                RefreshProfileList()
+            end,
+        })
+        TabVisuals:Toggle({
+            Title = "Auto-Load 'default' Profile on Startup",
+            Value = State.ConfigAutoLoad,
+            Callback = function(v)
+                State.ConfigAutoLoad = v
+                App.Persistence.SaveMeta(v, "default")
+            end,
+        })
     else
         -- Native PC/Mobile Fallback UI
         local FallbackFrame = Instance.new("Frame")
@@ -5095,7 +6211,7 @@ do
         TitleBar.TextSize = 14
         TitleBar.TextColor3 = Color3.new(1, 1, 1)
         TitleBar.TextXAlignment = Enum.TextXAlignment.Left
-        TitleBar.Text = "🚔 Prison Life 2026 Pro (v4.0)"
+        TitleBar.Text = "🚔 Prison Life 2026 Pro (v5.0)"
         TitleBar.Parent = FallbackFrame
 
         local Scroll = Instance.new("ScrollingFrame")
@@ -5164,6 +6280,7 @@ end
 -- // Cleanup Registration
 Env.PrisonLife2026Cleanup = function()
     Env.PrisonLife2026Running = false
+    pcall(RunService.UnbindFromRenderStep, RunService, "PL2026_ShieldRestore")
     if Core.CleanupCharFly then Core.CleanupCharFly() end
     if Core.StopFEInvisible then Core.StopFEInvisible() end
     DestroyHoloShield()
@@ -5188,4 +6305,5 @@ Env.PrisonLife2026Cleanup = function()
     end
 end
 
-Notify("Prison Life • 2026 Pro v4.0", "Loaded Clutter-Free KX Edition (PC & Mobile)!", 3.5)
+App.Persistence.TryAutoLoad()
+Notify("Prison Life • 2026 Pro v5.0", "Loaded Architect KX Edition (Pooled VFX + Signature Hooks + Profiles)!", 3.5)

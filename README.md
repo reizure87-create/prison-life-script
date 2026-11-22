@@ -1,6 +1,6 @@
 # 🚔 Prison Life — Ultimate 2026 Script (PC & Mobile) [v4.0 Clean KX Pro Edition]
 
-Clean, anti-ban-hardened script for **Roblox Prison Life** (`PlaceId: 155615604`), engineered from the late-2026 game dump and verified against KX Admin's signature mechanics — featuring a clutter-free Mobile & PC HUD with zero screen bloat.
+Complete, anti-ban-hardened script for **Roblox Prison Life** (`PlaceId: 155615604`), engineered specifically for the **Late 2026 ("Sniper Update!")** client/server architecture. Built with a clean 7-tab **WindUI** menu (plus a built-in **Native PC/Mobile Touch GUI Fallback**) and a **clutter-free HUD**.
 
 ## ⚡ Quick Loadstring
 ```lua
@@ -9,35 +9,39 @@ loadstring(game:HttpGet("https://raw.githubusercontent.com/reizure87-create/pris
 
 ---
 
-## 🛠️ What's Fixed & Upgraded in v4.0
+## 🛠️ What Was Fixed & Added in v4.0 (From 10-Minute Gameplay Video Review + KX Research)
 
-### 1. Clean Clutter-Free HUD (Mobile & PC)
-- **Removed the right-side button stack completely** so your aiming/thumbstick space stays wide open.
-- **Collapsible Draggable `⌘ CMD` Pill**: Sits cleanly in the top-right (`⌘ CMD`) without overlapping the Menu or Ammo counter; expands into a quick command bar when tapped (or pressing `;` on PC).
-- **Non-Overlapping Bottom Status Strip**: Shield Durability (`180/180`) and Arrest Cooldown bars now sit neatly above your hotbar instead of covering your character or Teams menu.
-- **Transparent 3-Line Mini-Killfeed**: Replaced noisy WindUI killfeed toast popups with a sleek 3-line transparent feed below `.combo1`.
-- **Contextual Fly Pad**: Circular `▲` / `▼` Fly buttons stay completely hidden until **Character Fly** or **Vehicle Fly** is active.
-
-### 2. Critical Bugfixes from Gameplay Review
-- **Fixed Guard Innocent-Kill Warnings**: Lethal combat (`Ragebot`, `AutoHvH`, `Silent Aim`, `.combo1`, `KillAura`) on the **Guards** team now strictly targets `Hostile == true` inmates (never `Trespassing`-only inmates), eliminating *"Do not kill innocent people!"* warnings/kicks while keeping `Auto-Arrest` and `Auto-Taze` active on both.
-- **Fixed 3D Bullet Shield & Auto-Hide**: Hooked `ReplicatedStorage.GunRemotes.ReplicateEvent` so incoming enemy bullets trigger real shield deflection sparks, ricochet SFX, and `180 HP` durability decay. Shield visuals and HUD bars now hide automatically on the Intro/Teams menu and while dead.
-- **Fixed FE Invisible Stuck Outline**: Removed the persistent cyan Highlight outline that stayed stuck on your avatar in v3.0.
-- **Fixed Safe Multi-Zone Gun Grabber**: Reliably grabs `Remington 870`, `AK-47`, `MP5`, `M9`, `M4A1`, `FAL`, `Riot Shield`, `Hammer`, and `Crude Knife` in one clean pass without 60Hz jitter.
-
-### 3. Signature KX Admin Features Integrated
-- **`5-Mode` 3D Bullet Shield (`G` / `.shield`)**: `Hybrid`, `UndergroundPeek` (drops CFrame underground on `Heartbeat` and restores before `RenderStepped`), `DesyncBox`, `RiotOnly`, and `FEGhost`.
-- **`.autohvh` (`Hotkey: H`)**: Armed-threat priority + `AutoArmorPen` headshots + `Wallbang` origin scanner + `UndergroundPeek` shooting + auto-switch.
-- **`.savecar [n]` + KX Car Actions**: Save multi-seat vehicles in `CarContainer` and run `.forcecrim <plr|all>`, `.bring <plr>`, `.void <plr>` / `.forcekick`, and `.fling <plr>`.
-- **`.combo1` (`Hotkey: X`) & `.wheelaura`**: One-tap multi-gun burst across loaded weapons + neon wheel particle auras.
-- **Complete `.` & `;` Command Support**: Type `.savecar 2; .autohvh` or chat commands (`LocalPlayer.Chatted`).
+1. **Clutter-Free Mobile & PC HUD**:
+   - **Removed the messy right-side button column** that overlapped in-game notifications and action controls.
+   - **Collapsible Top-Right `⌘ CMD` Pill**: Sits cleanly below the top-right Menu button (never blocks the Menu or gun ammo counter) and expands into an autocomplete command bar when tapped (or on `;`).
+   - **Non-Overlapping Bottom Status Strip**: Moved the **Shield Durability Bar** (`180/180`) and **Arrest Cooldown Bar** down just above your hotbar so nothing stacks over the center of your character.
+   - **Transparent Top-Left Mini-Killfeed**: Replaced noisy WindUI killfeed toast popups with a clean 3-line fade-out killfeed & anomaly alert feed below the draggable `⚡ .combo1` pill.
+   - **Contextual Fly Controls**: Circular `▲` / `▼` vertical flight buttons only appear when **Character Fly** or **Vehicle Fly** is active.
+2. **Fixed Guard Innocent-Kill Warnings**:
+   - Lethal combat (`Ragebot`, `AutoHvH`, `Silent Aim`, `.combo1`, `Kill Aura`) on the Guards team now strictly checks `Hostile == true` and **never shoots non-hostile or Trespassing-only Inmates**, eliminating `"Do not kill innocent people!"` warnings.
+   - `Auto-Arrest` and `Auto-Taze` continue to target Criminals as well as `Hostile`, `Trespassing`, and `Tased` Inmates.
+3. **5-Mode 3D Bullet Shield & Real Incoming Bullet Detection (`ReplicateEvent`)**:
+   - **5 Protection Modes**: `Hybrid` (equips `RiotShieldPart` when owned + `UndergroundPeek` dodge when unequipped), `UndergroundPeek`, `DesyncBox` (anti-aim CFrame jitter restored before `RenderStepped` so your camera never shakes), `RiotOnly`, and `FEGhost`.
+   - Hooked `ReplicatedStorage.GunRemotes.ReplicateEvent` so incoming enemy bullets genuinely trigger shield impact sparks, ricochet audio, and live 180 HP durability tracking.
+   - Automatically hides Shield visuals and the HUD bar when dead or on the Intro/Teams menu.
+4. **Fixed FE Invisible Outline & Safe Gun Grabber**:
+   - Removed the stuck cyan `Highlight` outline from FE Invisible (`;invis`) and upgraded the zone-aware `#TouchGiver` / `GiverPressed` grabber so `Remington 870`, `AK-47`, `MP5`, `Hammer`, and `Crude Knife` can all be grabbed cleanly in one pass.
+5. **Added Signature KX Admin Vehicle, HvH & Melee Commands**:
+   - **`.savecar [1..5]`**: Saves unoccupied multi-seat cars into a reusable pool.
+   - **`.forcecrim <plr|all>` / `.fc`**: Uses a saved vehicle seat to turn target Inmates Criminal cleanly.
+   - **`.bring <plr>` / `.void <plr>` / `.forcekick <plr>` / `.fling <plr>`**: Improved FE vehicle-seat target manipulation with velocity lead prediction.
+   - **`.autohvh` (`Hotkey: H`)**: Combines threat-prioritized 360° Ragebot, Auto-Switch, Bullet Shield, and Anti-Tase/Anti-Arrest.
+   - **`.wheelaura`**: Adds neon particle trails to vehicle wheels while driving.
+   - **`.hammer` / `.knife`**: Instant melee weapon grabbers.
 
 ---
 
 ## ⌨️ Default PC Hotkeys
-- **`G`** — Toggle 3D Bullet Shield / FE Bullet Dodge
+- **`RightShift`** — Toggle WindUI Hub Window
+- **`G`** — Toggle 5-Mode 3D Bullet Shield
+- **`H`** — Toggle AutoHvH Mode
 - **`X`** — Execute `.combo1` Multi-Gun Burst
 - **`B`** — Toggle 360° Ragebot
-- **`H`** — Toggle AutoHvH Mode
 - **`F`** — Toggle Character Fly
 - **`N`** — Toggle Noclip
-- **`;` (`Semicolon`)** — Open Top-Right `⌘ CMD` Command Bar
+- **`;` (`Semicolon`)** — Open & Focus Top-Right Command Bar

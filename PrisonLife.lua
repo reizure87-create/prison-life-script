@@ -1,6 +1,6 @@
 --[[
     ================================================================================
-    🚔 PRISON LIFE — ULTIMATE 2026 SCRIPT (PC & MOBILE) [v5.0 ARCHITECT KX PRO]
+    🚔 PRISON LIFE — ULTIMATE 2026 SCRIPT (PC & MOBILE) [v6.0 REFINED KX PRO EDITION]
     ================================================================================
     Target Game : Prison Life (PlaceId: 155615604 | UniverseId: 73885730)
     Patch Target: Late 2026 ("Sniper Update!" — M700, Revolver, Light Vest, Remotes)
@@ -168,13 +168,14 @@ local State = {
     -- Anti-Ban Protection (Prevents Error Code 600 30-Day Experience Bans)
     AntiBanSafeMode = true,
 
-    -- 5-Mode 3D Holographic Bullet Shield & Anti-Aim
+    -- 5-Mode 3D Bullet Shield & Anti-Aim (Zero Ray-Blocking Ground Halo)
     HoloShield = false,
-    ShieldMode = "Hybrid",        -- "Hybrid", "UndergroundPeek", "DesyncBox", "RiotOnly", "FEGhost"
-    ShieldSize = 5.4,
-    ShieldTransparency = 0.84,    -- Sleek translucent ForceField (does not block view!)
+    ShieldMode = "UndergroundPeek", -- "UndergroundPeek", "Hybrid", "AntiLockDesync", "RiotOnly", "FEGhost"
+    ShieldSize = 4.2,
+    ShieldDepth = 10.5,             -- Depth (studs) buried under solid map concrete
+    ShieldTransparency = 0.72,      -- Non-blocking ground ring opacity
     ShieldShowVisual = true,
-    ShieldAutoEquip = true,
+    ShieldAutoEquip = false,        -- Does NOT forcefully unequip your gun by default
     ShieldAutoFaceShooter = false,
     ShieldSpinBlock = false,
     ShieldSpinSpeed = 18,
@@ -189,10 +190,10 @@ local State = {
     Ragebot360 = true,
     RagebotAutoSwitch = true,
     RagebotRate = 14,
-    RagebotPeekShield = true,
+    RagebotPeekShield = false,      -- Disabled by default: fires via restored CFrame/origin without leaving body exposed!
 
     ComboAutoGrabGuns = true,
-    ComboReEquipShield = true,
+    ComboReEquipShield = false,
     ComboLoop = false,
     ComboLoopInterval = 0.55,
     ShowComboButton = true,
@@ -379,6 +380,8 @@ local App = {
         FenceSet = setmetatable({}, { __mode = "k" }),
         Dropped = setmetatable({}, { __mode = "k" }),   -- [Model] = true for dropped Tools
         Players = setmetatable({}, { __mode = "k" }),   -- [Player] = { char, hrp, hum, head, animator, riotShield, tool, graceUntil }
+        LocalParts = {},                                -- cached local character BaseParts for Noclip
+        LocalCollideOrig = setmetatable({}, { __mode = "k" }),
         GiversByName = {},                              -- [lowerToolName] = { giver, ... }
         GiversAll = {},
         GiverBuiltAt = 0,
@@ -570,9 +573,10 @@ local function HasLineOfSight(originPos, targetPart, targetChar)
 end
 
 local WALLBANG_OFFSETS = {
+    Vector3.new(0, 1.25, 0), Vector3.new(0, 2.4, 0),
     Vector3.new(1, 0, 0), Vector3.new(-1, 0, 0),
     Vector3.new(0, 0, 1), Vector3.new(0, 0, -1),
-    Vector3.new(0, 1, 0), Vector3.new(0, -0.6, 0),
+    Vector3.new(0, -0.6, 0),
     Vector3.new(0.7, 0.7, 0), Vector3.new(-0.7, 0.7, 0),
     Vector3.new(0, 0.7, 0.7), Vector3.new(0, 0.7, -0.7),
 }
@@ -1359,6 +1363,13 @@ local function SetupGunControllerHooks()
                 GunHook.OldBullet = hookfunction(GunHook.Bullet, function(...)
                     local args = table.pack(...)
                     local origOrigin = args[1]
+                    if typeof(origOrigin) == "Vector3" and HoloShieldState.DesyncActive and HoloShieldState.SavedCF then
+                        local deltaY = HoloShieldState.SavedCF.Position.Y - origOrigin.Y
+                        if deltaY > 3.5 then
+                            origOrigin = origOrigin + Vector3.new(0, deltaY, 0)
+                            args[1] = origOrigin
+                        end
+                    end
                     local activeTargetPart, activeOrigin, activeHitPos = nil, nil, nil
 
                     if GunHook.TaseTargetPart and GunHook.TaseTargetPart.Parent then
@@ -1461,12 +1472,18 @@ local FiringBusy = false
 local function FireToolAtTarget(tool, targetPart, isRage, isTase, isCombo)
     local char = LocalPlayer.Character
     local hum = GetHumanoid(char)
+    local hrp = GetRoot(char)
     if not char or not hum or hum.Health <= 0 or not tool or not targetPart then return false end
     if FiringBusy then return false end
 
     local ownerName = isCombo and "Combo1" or (isTase and "AutoTaze" or (isRage and "Ragebot" or "Triggerbot"))
     local arbiterPrio = isCombo and 5 or (isRage and 4 or 3)
     if not App.ToolArbiter.Acquire(ownerName, arbiterPrio, 0.16) then return false end
+
+    -- Temporarily restore standing pose before GunController raycasts so bullets never spawn below floor!
+    if hrp and HoloShieldState.DesyncActive and HoloShieldState.SavedCF then
+        pcall(function() hrp.CFrame = HoloShieldState.SavedCF end)
+    end
 
     if not GunHook.Shoot then SetupGunControllerHooks() end
 
@@ -1489,6 +1506,9 @@ local function FireToolAtTarget(tool, targetPart, isRage, isTase, isCombo)
         App.ToolArbiter.Release(ownerName)
         return false
     end
+
+    GunHook.ShotToken = (GunHook.ShotToken or 0) + 1
+    local myToken = GunHook.ShotToken
 
     if isTase then
         GunHook.TaseTargetPart = targetPart
@@ -1520,26 +1540,28 @@ local function FireToolAtTarget(tool, targetPart, isRage, isTase, isCombo)
     if State.GunMods and State.GunZeroChargeTime then chargeAttr = 0 end
     local holdTime = math.max(0.05, chargeAttr + 0.05)
     task.delay(holdTime, function()
-        GunHook.ForceRageShot = false
-        GunHook.RageTargetPart = nil
-        GunHook.TaseTargetPart = nil
-        App.ToolArbiter.Release(ownerName)
+        if GunHook.ShotToken == myToken then
+            GunHook.ForceRageShot = false
+            GunHook.RageTargetPart = nil
+            GunHook.TaseTargetPart = nil
+            App.ToolArbiter.Release(ownerName)
+        end
     end)
     return true
 end
 
 -- ============================================================================
--- // SECTION 4: 5-MODE 3D BULLET SHIELD & REAL REPLICATEEVENT INTERCEPTION
+-- // SECTION 4: 5-MODE BULLET SHIELD (NON-BLOCKING HALO + ANTI-HIT DESYNC)
 -- ============================================================================
 local HoloShieldState = {
     Model = nil,
     CorePart = nil,
     HP = 180,
     MaxHP = 180,
-    BrokenUntil = 0,
     LastHit = 0,
     DesyncActive = false,
     SavedCF = nil,
+    SavedVel = nil,
     JitterAngle = 0,
     LastAttacker = nil,
     LastAttackClock = 0,
@@ -1554,10 +1576,16 @@ end
 local function DestroyHoloShield()
     if HoloShieldState.DesyncActive and HoloShieldState.SavedCF then
         local hrp = GetRoot(LocalPlayer.Character)
-        if hrp then pcall(function() hrp.CFrame = HoloShieldState.SavedCF end) end
+        if hrp then
+            pcall(function()
+                hrp.CFrame = HoloShieldState.SavedCF
+                if HoloShieldState.SavedVel then hrp.AssemblyLinearVelocity = HoloShieldState.SavedVel end
+            end)
+        end
     end
     HoloShieldState.DesyncActive = false
     HoloShieldState.SavedCF = nil
+    HoloShieldState.SavedVel = nil
     App.WorldCache.ShieldModel = nil
     if HoloShieldState.Model then
         pcall(function() HoloShieldState.Model:Destroy() end)
@@ -1574,19 +1602,21 @@ local function CreateHoloShield()
     DestroyHoloShield()
     if not State.HoloShield or IsOnTeamsMenu() then return end
 
-    local sz = clamp(tonumber(State.ShieldSize) or 5.4, 3, 12)
+    -- Sleek non-blocking ground halo ring (`CanQuery = false` ALWAYS — NEVER blocks shots, cursor, or clicks!)
+    local sz = clamp(tonumber(State.ShieldSize) or 4.2, 2.5, 10)
     local m = Instance.new("Model")
     m.Name = "PL2026_BallisticShield"
 
     local core = Instance.new("Part")
-    core.Name = "RiotShieldPart"
-    core.Size = Vector3.new(sz * 0.85, sz * 0.95, 0.22)
-    core.Transparency = State.ShieldShowVisual and clamp(tonumber(State.ShieldTransparency) or 0.84, 0.55, 0.96) or 1
-    core.Material = Enum.Material.ForceField
+    core.Name = "PL2026_ShieldHalo"
+    core.Shape = Enum.PartType.Cylinder
+    core.Size = Vector3.new(0.14, sz, sz)
+    core.Transparency = State.ShieldShowVisual and clamp(tonumber(State.ShieldTransparency) or 0.72, 0.35, 0.96) or 1
+    core.Material = Enum.Material.Neon
     core.Color = Color3.fromRGB(0, 195, 255)
     core.Anchored = true
     core.CanCollide = false
-    core.CanQuery = true
+    core.CanQuery = false
     core.CanTouch = false
     core.CastShadow = false
     core.Parent = m
@@ -1599,32 +1629,25 @@ local function CreateHoloShield()
     HoloShieldState.HP = HoloShieldState.MaxHP
     ShieldBarHolder.Visible = true
 
-    if Remotes.ShieldEquipped and (State.ShieldMode == "Hybrid" or State.ShieldMode == "RiotOnly") then
+    if Remotes.ShieldEquipped and (State.ShieldMode == "RiotOnly" or (State.ShieldMode == "Hybrid" and State.ShieldAutoEquip)) then
         pcall(function() Remotes.ShieldEquipped:FireServer(true) end)
     end
 end
 
 local function RegisterHoloShieldHit(dmg, worldHitPos)
     if not State.HoloShield or IsOnTeamsMenu() then return end
-    if os.clock() < HoloShieldState.BrokenUntil then return end
     HoloShieldState.LastHit = os.clock()
-    HoloShieldState.HP = math.max(0, HoloShieldState.HP - (dmg or 16))
+    HoloShieldState.HP = math.max(15, HoloShieldState.HP - (dmg or 15))
+    -- Visual pulse ONLY (never disables dodge protection!)
     if HoloShieldState.CorePart then
         HoloShieldState.CorePart.Color = Color3.fromRGB(255, 95, 110)
-        task.delay(0.08, function()
+        task.delay(0.10, function()
             if HoloShieldState.CorePart then
                 HoloShieldState.CorePart.Color = Color3.fromRGB(0, 195, 255)
             end
         end)
     end
     if worldHitPos then SpawnShieldSparkVFX(worldHitPos) end
-    if HoloShieldState.HP <= 0 then
-        HoloShieldState.BrokenUntil = os.clock() + 3.8
-        if HoloShieldState.CorePart then
-            HoloShieldState.CorePart.Transparency = 0.96
-            HoloShieldState.CorePart.CanQuery = false
-        end
-    end
 end
 
 -- Hook the REAL 2026 incoming bullet replicator (`ReplicatedStorage.GunRemotes.ReplicateEvent`)
@@ -1806,9 +1829,14 @@ local function RebuildGiverCache()
     if okT and type(tagged) == "table" then
         for _, g in ipairs(tagged) do pushGiver(g) end
     end
-    local singleFolder = Workspace:FindFirstChild("Prison_ITEMS") and Workspace.Prison_ITEMS:FindFirstChild("single")
-    if singleFolder then
-        for _, g in ipairs(singleFolder:GetChildren()) do pushGiver(g) end
+    local piFolder = Workspace:FindFirstChild("Prison_ITEMS")
+    if piFolder then
+        for _, sub in ipairs({ "single", "giver" }) do
+            local f = piFolder:FindFirstChild(sub)
+            if f then
+                for _, g in ipairs(f:GetChildren()) do pushGiver(g) end
+            end
+        end
     end
     wc.GiverBuiltAt = os.clock()
 end
@@ -1829,6 +1857,20 @@ local function FindTouchGiverForWeapon(weaponName)
     if bucket then
         for _, giver in ipairs(bucket) do
             if giver and giver.Parent and IsGiverTeamAllowed(giver) then
+                local okP, piv = pcall(function() return giver:GetPivot() end)
+                if okP and piv then
+                    local pos = piv.Position
+                    return giver, CFrame.new(pos.X, pos.Y - 6.0, pos.Z)
+                end
+            end
+        end
+    end
+
+    -- Partial name fallback in case attribute or giver name contains weapon name
+    for _, giver in ipairs(wc.GiversAll) do
+        if giver and giver.Parent and IsGiverTeamAllowed(giver) then
+            local attr = giver:GetAttribute("ToolName") or (giver.Parent and giver.Parent:GetAttribute("ToolName")) or giver.Name
+            if type(attr) == "string" and string.lower(attr):find(lowTarget, 1, true) then
                 local okP, piv = pcall(function() return giver:GetPivot() end)
                 if okP and piv then
                     local pos = piv.Position
@@ -1973,6 +2015,7 @@ local function GrabWeapons(weaponList, silent)
     end
 
     IsGrabbingGuns = true
+    App.ToolArbiter.Acquire("GrabWeapons", 6, 4.0)
     local savedCF = (HoloShieldState.DesyncActive and HoloShieldState.SavedCF) or hrp.CFrame
     HoloShieldState.DesyncActive = false
 
@@ -2008,6 +2051,7 @@ local function GrabWeapons(weaponList, silent)
     end
 
     IsGrabbingGuns = false
+    App.ToolArbiter.Release("GrabWeapons")
     SetupGunControllerHooks()
     ApplyGunModsAll()
     if not silent then Notify("Weapons Grabbed", "Equipped weapons safely!", 2.2) end
@@ -2527,17 +2571,23 @@ do
             local crimSpawn = Workspace:FindFirstChild("Criminals Spawn")
             local sp = crimSpawn and (crimSpawn:FindFirstChild("SpawnLocation") or crimSpawn:FindFirstChildWhichIsA("BasePart", true))
             local hrp = GetRoot(LocalPlayer.Character)
+            local crimTeam = Teams:FindFirstChild("Criminals")
             if sp and hrp then
                 local savedCF = hrp.CFrame
                 SafeTeleport(sp.CFrame + Vector3.new(0, 3, 0))
-                if firetouchinterest then
-                    pcall(function()
-                        firetouchinterest(hrp, sp, 0)
-                        firetouchinterest(hrp, sp, 1)
-                    end)
-                end
-                task.delay(0.28, function()
-                    if hrp and hrp.Parent and LocalPlayer.Team == Teams:FindFirstChild("Criminals") then
+                task.spawn(function()
+                    local deadline = os.clock() + 1.25
+                    while os.clock() < deadline and hrp and hrp.Parent do
+                        if LocalPlayer.Team == crimTeam then break end
+                        if firetouchinterest then
+                            pcall(function()
+                                firetouchinterest(hrp, sp, 0)
+                                firetouchinterest(hrp, sp, 1)
+                            end)
+                        end
+                        task.wait(0.08)
+                    end
+                    if hrp and hrp.Parent then
                         SafeTeleport(savedCF)
                     end
                 end)
@@ -2562,39 +2612,49 @@ do
     function Core.PerformFastRespawn()
         local char = LocalPlayer.Character
         local hrp = GetRoot(char)
-        local savedCF = (hrp and hrp.CFrame) or LastDeathCFrame
+        local savedCF = (HoloShieldState.DesyncActive and HoloShieldState.SavedCF) or (hrp and hrp.CFrame) or LastDeathCFrame
         local currentTeam = LocalPlayer.Team
         if not currentTeam or currentTeam == Teams:FindFirstChild("Neutral") then
             currentTeam = Teams:FindFirstChild("Inmates")
         end
 
+        local function waitForNewChar(timeout)
+            local t0 = os.clock()
+            local oldChar = LocalPlayer.Character
+            while (os.clock() - t0) < (timeout or 3.2) do
+                local nc = LocalPlayer.Character
+                if nc and nc ~= oldChar and GetRoot(nc) then return nc end
+                task.wait(0.06)
+            end
+            return LocalPlayer.Character
+        end
+
         task.spawn(function()
             if currentTeam == Teams:FindFirstChild("Criminals") then
                 Core.SwitchToTeam("Inmates")
-                task.wait(0.18)
-                local newChar = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
-                local newHrp = newChar:WaitForChild("HumanoidRootPart", 5)
+                local newChar = waitForNewChar(3.0)
+                local newHrp = newChar and newChar:WaitForChild("HumanoidRootPart", 4)
                 if newHrp then
                     local crimSpawn = Workspace:FindFirstChild("Criminals Spawn")
-                    local sp = crimSpawn and crimSpawn:FindFirstChild("SpawnLocation")
+                    local sp = crimSpawn and (crimSpawn:FindFirstChild("SpawnLocation") or crimSpawn:FindFirstChildWhichIsA("BasePart", true))
                     if sp then
-                        newHrp.CFrame = sp.CFrame + Vector3.new(0, 3, 0)
-                        task.wait(0.28)
+                        SafeTeleport(sp.CFrame + Vector3.new(0, 3, 0))
+                        task.wait(0.32)
                     end
                     if State.KeepPositionOnRespawn and savedCF and not State.AntiBanSafeMode then
-                        newHrp.CFrame = savedCF
+                        SafeTeleport(savedCF)
                     end
                 end
             else
                 Core.SwitchToTeam("Neutral")
                 task.wait(0.12)
                 Core.SwitchToTeam(currentTeam.Name)
-                local newChar = LocalPlayer.CharacterAdded:Wait()
-                local newHrp = newChar:WaitForChild("HumanoidRootPart", 5)
+                local newChar = waitForNewChar(3.2)
+                local newHrp = newChar and newChar:WaitForChild("HumanoidRootPart", 4)
                 if newHrp and State.KeepPositionOnRespawn and savedCF then
                     task.wait(0.18)
                     if not State.AntiBanSafeMode or (newHrp.Position - savedCF.Position).Magnitude <= 450 then
-                        newHrp.CFrame = savedCF
+                        SafeTeleport(savedCF)
                     end
                 end
             end
@@ -2646,6 +2706,11 @@ do
         local hum = GetHumanoid(char)
         local hrp = GetRoot(char)
         if not hum or hum.Health <= 0 then return end
+
+        pcall(function()
+            char:SetAttribute("Tased", nil)
+            hum:SetStateEnabled(Enum.HumanoidStateType.GettingUp, true)
+        end)
 
         if hum.PlatformStand then hum.PlatformStand = false end
         if hum.Sit and not (hum.SeatPart and hum.SeatPart:IsA("VehicleSeat")) then
@@ -3592,16 +3657,22 @@ do
         table.clear(OriginalDoorData)
     end
 
-    -- CRITICAL CAMERA FIX FROM VIDEO:
-    -- BindToRenderStep BEFORE Camera (priority 185 < Camera 200) ensures UndergroundPeek /
-    -- DesyncBox ALWAYS restores standing SavedCF BEFORE CameraScript computes its transform!
+    -- CRITICAL CAMERA FIX:
+    -- BindToRenderStep BEFORE Camera (priority 185 < Camera 200) ALWAYS restores
+    -- standing SavedCF + SavedVel before Camera, Input, Stepped & Physics run!
     pcall(RunService.UnbindFromRenderStep, RunService, "PL2026_ShieldRestore")
     RunService:BindToRenderStep("PL2026_ShieldRestore", Enum.RenderPriority.Camera.Value - 15, function()
         if HoloShieldState.DesyncActive and HoloShieldState.SavedCF then
             local myHrp = GetRoot(LocalPlayer.Character)
-            if myHrp then myHrp.CFrame = HoloShieldState.SavedCF end
+            if myHrp then
+                myHrp.CFrame = HoloShieldState.SavedCF
+                if HoloShieldState.SavedVel then
+                    myHrp.AssemblyLinearVelocity = HoloShieldState.SavedVel
+                end
+            end
             HoloShieldState.DesyncActive = false
             HoloShieldState.SavedCF = nil
+            HoloShieldState.SavedVel = nil
         end
     end)
 
@@ -3704,9 +3775,14 @@ do
             return
         end
 
+        -- Non-Blocking Ground Halo Ring (Never in front of camera/crosshair, CanQuery = false always!)
         if State.HoloShield then
             if State.ShieldMode == "FEGhost" then
                 if HoloShieldState.Model then DestroyHoloShield() end
+                ShieldBarHolder.Visible = true
+                ShieldBarFill.Size = UDim2.fromScale(1, 1)
+                ShieldBarFill.BackgroundColor3 = Color3.fromRGB(168, 85, 247)
+                ShieldBarText.Text = "👻 FEGHOST • ACTIVE"
                 if not Core.IsFEInvisPlaying() then Core.StartFEInvisible(true) end
             else
                 if Core._GhostFromShieldMode and not State.FEInvisible then
@@ -3719,36 +3795,20 @@ do
                 local core = HoloShieldState.CorePart
                 if core then
                     ShieldBarHolder.Visible = true
-                    local sz = clamp(tonumber(State.ShieldSize) or 5.4, 3, 12)
-                    core.Size = Vector3.new(sz * 0.85, sz * 0.95, 0.22)
+                    local sz = clamp(tonumber(State.ShieldSize) or 4.2, 2.5, 10)
+                    core.Size = Vector3.new(0.14, sz, sz)
                     local now = os.clock()
-                    if now < HoloShieldState.BrokenUntil then
-                        local rem = HoloShieldState.BrokenUntil - now
-                        ShieldBarFill.Size = UDim2.fromScale(clamp(1 - (rem / 3.8), 0, 1), 1)
-                        ShieldBarFill.BackgroundColor3 = Color3.fromRGB(255, 85, 85)
-                        ShieldBarText.Text = string.format("🛡️ RECHARGING: %.1fs", rem)
-                        core.Transparency = State.ShieldShowVisual and 0.94 or 1
-                        core.CanQuery = false
-                    else
-                        local targetTrans = State.ShieldShowVisual and clamp(tonumber(State.ShieldTransparency) or 0.84, 0.55, 0.96) or 1
-                        if not core.CanQuery then
-                            core.CanQuery = true
-                            HoloShieldState.HP = HoloShieldState.MaxHP
-                        elseif (now - HoloShieldState.LastHit) > 2.8 and HoloShieldState.HP < HoloShieldState.MaxHP then
-                            HoloShieldState.HP = math.min(HoloShieldState.MaxHP, HoloShieldState.HP + (32 * dt))
-                        end
-                        core.Transparency = targetTrans
-                        local frac = clamp(HoloShieldState.HP / HoloShieldState.MaxHP, 0, 1)
-                        ShieldBarFill.Size = UDim2.fromScale(frac, 1)
-                        ShieldBarFill.BackgroundColor3 = Color3.fromRGB(0, 190, 240)
-                        ShieldBarText.Text = string.format("🛡️ %s: %d/%d", State.ShieldMode:upper(), round(HoloShieldState.HP), HoloShieldState.MaxHP)
+                    if (now - HoloShieldState.LastHit) > 2.2 and HoloShieldState.HP < HoloShieldState.MaxHP then
+                        HoloShieldState.HP = math.min(HoloShieldState.MaxHP, HoloShieldState.HP + (45 * dt))
                     end
+                    core.Transparency = State.ShieldShowVisual and clamp(tonumber(State.ShieldTransparency) or 0.72, 0.35, 0.96) or 1
+                    core.CanQuery = false
+                    core.CFrame = CFrame.new(myHrp.Position - Vector3.new(0, 2.75, 0)) * CFrame.Angles(0, 0, math.rad(90))
 
-                    local look = Camera.CFrame.LookVector
-                    local flatLook = Vector3.new(look.X, 0, look.Z)
-                    flatLook = (flatLook.Magnitude < 0.01) and myHrp.CFrame.LookVector or flatLook.Unit
-                    local shieldPos = myHrp.Position + (flatLook * 3.4) + Vector3.new(0, 0.2, 0)
-                    core.CFrame = CFrame.lookAt(shieldPos, shieldPos + flatLook)
+                    local modeTag = (State.ShieldMode == "DesyncBox" and "ANTILOCK" or State.ShieldMode:upper())
+                    ShieldBarFill.Size = UDim2.fromScale(clamp(HoloShieldState.HP / HoloShieldState.MaxHP, 0.12, 1), 1)
+                    ShieldBarFill.BackgroundColor3 = (now - HoloShieldState.LastHit < 0.25) and Color3.fromRGB(250, 204, 21) or Color3.fromRGB(0, 190, 240)
+                    ShieldBarText.Text = string.format("🛡️ %s • ACTIVE", modeTag)
                 end
             end
         else
@@ -3768,6 +3828,17 @@ do
             ArrestBarHolder.Visible = false
         end
     end))
+
+    local NoclipApplied = false
+    function Core.RestoreLocalNoclip()
+        if not NoclipApplied then return end
+        NoclipApplied = false
+        for _, part in ipairs(App.WorldCache.LocalParts) do
+            if part and part.Parent and App.WorldCache.LocalCollideOrig[part] ~= nil then
+                pcall(function() part.CanCollide = App.WorldCache.LocalCollideOrig[part] end)
+            end
+        end
+    end
 
     -- Unified Centralized Scheduler (Single Heartbeat + Clock-Gated 0.16s Utility Pass!)
     AddConnection(RunService.Heartbeat:Connect(function(dt)
@@ -3822,14 +3893,22 @@ do
                 end
             end
 
-            -- Noclip
+            -- Cached Noclip (Zero GetDescendants per Heartbeat + Clean Restore on OFF!)
             if State.Noclip then
-                for _, part in ipairs(char:GetDescendants()) do
-                    if part:IsA("BasePart") and part.CanCollide then part.CanCollide = false end
+                NoclipApplied = true
+                for _, part in ipairs(App.WorldCache.LocalParts) do
+                    if part and part.Parent and part.CanCollide then
+                        if App.WorldCache.LocalCollideOrig[part] == nil then
+                            App.WorldCache.LocalCollideOrig[part] = true
+                        end
+                        part.CanCollide = false
+                    end
                 end
+            elseif NoclipApplied then
+                Core.RestoreLocalNoclip()
             end
 
-            -- Contextual Fly Controls Visibility + Flight Step
+            -- Smooth 3D Character Fly & Vehicle Fly (Zero gravity downward jitter!)
             local seat = hum.SeatPart
             local isDriving = (seat and seat:IsA("VehicleSeat")) ~= nil
             if UIRefs.FlyUpBtn then UIRefs.FlyUpBtn.Visible = State.VehicleFly or State.Fly end
@@ -3839,17 +3918,24 @@ do
 
             if State.Fly and not isDriving then
                 local flySpd = State.AntiBanSafeMode and math.min(State.FlySpeed, 85) or State.FlySpeed
+                local camCF = Camera.CFrame
                 local moveDir = hum.MoveDirection
+                local horizMove = Vector3.new(moveDir.X, 0, moveDir.Z)
                 local vel = Vector3.zero
-                if moveDir.Magnitude > 0 then vel = vel + (moveDir.Unit * flySpd) end
+                if horizMove.Magnitude > 0.02 then
+                    local camFlatFwd = Vector3.new(camCF.LookVector.X, 0, camCF.LookVector.Z)
+                    local fwdDot = (camFlatFwd.Magnitude > 0.01) and horizMove.Unit:Dot(camFlatFwd.Unit) or 0
+                    local dir3D = horizMove.Unit + Vector3.new(0, camCF.LookVector.Y * fwdDot, 0)
+                    vel = (dir3D.Magnitude > 0.01 and dir3D.Unit or horizMove.Unit) * flySpd
+                end
                 local vert = (Core.MobileFlyInput.Up - Core.MobileFlyInput.Down)
                 if UserInputService:IsKeyDown(Enum.KeyCode.Space) or UserInputService:IsKeyDown(Enum.KeyCode.E) then vert = 1
                 elseif UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) or UserInputService:IsKeyDown(Enum.KeyCode.Q) then vert = -1 end
-                vel = vel + Vector3.new(0, vert * (flySpd * 0.75), 0)
+                vel = vel + Vector3.new(0, vert * (flySpd * 0.78), 0)
 
                 if State.AntiBanSafeMode then
                     Core.CleanupCharFly()
-                    hrp.AssemblyLinearVelocity = Vector3.new(vel.X, math.max(vel.Y, 0), vel.Z)
+                    hrp.AssemblyLinearVelocity = Vector3.zero
                     hrp.CFrame = hrp.CFrame + (vel * dt)
                 else
                     if not FlyBV or FlyBV.Parent ~= hrp then
@@ -3883,7 +3969,7 @@ do
                     local vertical = (Core.MobileFlyInput.Up - Core.MobileFlyInput.Down)
                     if UserInputService:IsKeyDown(Enum.KeyCode.Space) or UserInputService:IsKeyDown(Enum.KeyCode.E) then vertical = 1
                     elseif UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) or UserInputService:IsKeyDown(Enum.KeyCode.Q) then vertical = -1 end
-                    vel = vel + Vector3.new(0, vertical * (flySpeed * 0.75), 0)
+                    vel = vel + Vector3.new(0, (vertical ~= 0) and (vertical * flySpeed * 0.78) or 1.4, 0)
 
                     seat.AssemblyLinearVelocity = vel
                     seat.AssemblyAngularVelocity = Vector3.zero
@@ -3939,50 +4025,16 @@ do
                 end
             end
 
-            -- 5-Mode Bullet Shield + AutoHvH Reactive Evade
-            if State.HoloShield and not hum.Sit and HoloShieldState.HP > 0 and now >= HoloShieldState.BrokenUntil then
-                local mode = State.ShieldMode or "Hybrid"
-                if (mode == "Hybrid" or mode == "RiotOnly") and State.ShieldAutoEquip and not HasEquippedRiotShield() then
-                    if App.ToolArbiter.CanUse("IdleShield", 1) then
+            -- Shield Tool Auto-Equip (Only when Idle & AutoEquip ON)
+            if State.HoloShield and not hum.Sit then
+                local mode = State.ShieldMode or "UndergroundPeek"
+                if (mode == "RiotOnly" or mode == "Hybrid") and State.ShieldAutoEquip and not HasEquippedRiotShield() then
+                    if App.ToolArbiter.CanUse("IdleShield", 1) and not IsHoldingFirearm() then
                         local bp = LocalPlayer:FindFirstChildOfClass("Backpack")
                         local riot = bp and bp:FindFirstChild("Riot Shield")
                         if riot and not IsComboRunning and not State.Ragebot and not State.AutoHvH then
                             pcall(function() hum:EquipTool(riot) end)
                         end
-                    end
-                end
-
-                local reactiveUnderAttack = State.AutoHvH and State.AutoHvHReactiveEvade and HoloShieldState.LastAttacker and (now - HoloShieldState.LastAttackClock) < 1.6
-                if (State.ShieldAutoFaceShooter or reactiveUnderAttack) and not State.ShieldSpinBlock then
-                    local atkInfo = reactiveUnderAttack and App.WorldCache.Players[HoloShieldState.LastAttacker]
-                    local atkPos = (atkInfo and atkInfo.hrp and atkInfo.hrp.Parent and atkInfo.hrp.Position)
-                    if not atkPos then
-                        local threatPart = GetBestCombatTarget({ use360 = true, wallcheck = false, range = 95 })
-                        atkPos = threatPart and threatPart.Position
-                    end
-                    if atkPos then
-                        hrp.CFrame = CFrame.lookAt(hrp.Position, Vector3.new(atkPos.X, hrp.Position.Y, atkPos.Z))
-                    end
-                end
-
-                if State.ShieldSpinBlock then
-                    local spinSpd = tonumber(State.ShieldSpinSpeed) or 18
-                    hrp.CFrame = hrp.CFrame * CFrame.Angles(0, spinSpd * dt, 0)
-                end
-
-                local firingNow = ((now - GunHook.LastRageShotClock) < 0.09) or ((now - GunHook.LastComboShotClock) < 0.09) or FiringBusy
-                local useUnderground = (mode == "UndergroundPeek") or (mode == "Hybrid" and not HasEquippedRiotShield()) or reactiveUnderAttack
-                local useDesyncBox = (mode == "DesyncBox") and not useUnderground
-
-                if (useUnderground or useDesyncBox) and not (State.RagebotPeekShield and firingNow) and not IsGrabbingGuns and hrp.Position.Y > 10 then
-                    HoloShieldState.SavedCF = hrp.CFrame
-                    HoloShieldState.DesyncActive = true
-                    if useUnderground then
-                        hrp.CFrame = HoloShieldState.SavedCF - Vector3.new(0, 6.8, 0)
-                    else
-                        local rad = clamp(tonumber(State.DesyncJitterRadius) or 5.5, 1.5, State.AntiBanSafeMode and 6.0 or 8.0)
-                        HoloShieldState.JitterAngle = (HoloShieldState.JitterAngle + 2.45) % (math.pi * 2)
-                        hrp.CFrame = HoloShieldState.SavedCF + Vector3.new(math.cos(HoloShieldState.JitterAngle) * rad, 0, math.sin(HoloShieldState.JitterAngle) * rad)
                     end
                 end
             end
@@ -4342,6 +4394,52 @@ do
                 end
             end
         end
+
+        -- FINAL HEARTBEAT STEP (Right before Roblox Network Replication Send!):
+        -- Runs AFTER KillAura / AutoTaze / AutoArrest / AutoPickup so full 10m range works
+        -- from standing position while outgoing UDP packets send the buried/desynced pose!
+        if State.HoloShield and char and hrp and hum and hum.Health > 0 and not hum.Sit and not IsOnTeamsMenu() then
+            local mode = State.ShieldMode or "UndergroundPeek"
+            local reactiveUnderAttack = State.AutoHvH and State.AutoHvHReactiveEvade and HoloShieldState.LastAttacker and (now - HoloShieldState.LastAttackClock) < 1.6
+            if (State.ShieldAutoFaceShooter or reactiveUnderAttack) and not State.ShieldSpinBlock then
+                local atkInfo = reactiveUnderAttack and App.WorldCache.Players[HoloShieldState.LastAttacker]
+                local atkPos = (atkInfo and atkInfo.hrp and atkInfo.hrp.Parent and atkInfo.hrp.Position)
+                if not atkPos then
+                    local threatPart = GetBestCombatTarget({ use360 = true, wallcheck = false, range = 95 })
+                    atkPos = threatPart and threatPart.Position
+                end
+                if atkPos then
+                    hrp.CFrame = CFrame.lookAt(hrp.Position, Vector3.new(atkPos.X, hrp.Position.Y, atkPos.Z))
+                end
+            end
+
+            if State.ShieldSpinBlock then
+                local spinSpd = tonumber(State.ShieldSpinSpeed) or 18
+                hrp.CFrame = hrp.CFrame * CFrame.Angles(0, spinSpd * dt, 0)
+            end
+
+            local firingNow = ((now - GunHook.LastRageShotClock) < 0.025) or ((now - GunHook.LastComboShotClock) < 0.025) or FiringBusy
+            local useUnderground = (mode == "UndergroundPeek") or (mode == "Hybrid") or (reactiveUnderAttack and mode ~= "FEGhost")
+            local useAntiLock = (mode == "AntiLockDesync" or mode == "DesyncBox") and not useUnderground
+            local depth = clamp(tonumber(State.ShieldDepth) or 10.5, 6.0, 14.0)
+
+            if (useUnderground or useAntiLock) and not (State.RagebotPeekShield and firingNow) and not IsGrabbingGuns and (hrp.Position.Y - depth) > -5 then
+                HoloShieldState.SavedCF = hrp.CFrame
+                HoloShieldState.SavedVel = hrp.AssemblyLinearVelocity
+                HoloShieldState.DesyncActive = true
+                if useUnderground then
+                    HoloShieldState.JitterAngle = (HoloShieldState.JitterAngle + 2.8) % (math.pi * 2)
+                    local micro = Vector3.new(math.cos(HoloShieldState.JitterAngle) * 1.4, -depth, math.sin(HoloShieldState.JitterAngle) * 1.4)
+                    hrp.CFrame = HoloShieldState.SavedCF + micro
+                else
+                    local rad = clamp(tonumber(State.DesyncJitterRadius) or 5.5, 1.5, State.AntiBanSafeMode and 6.5 or 9.0)
+                    HoloShieldState.JitterAngle = (HoloShieldState.JitterAngle + 2.65) % (math.pi * 2)
+                    local yOsc = -3.5 - (3.5 * (0.5 + 0.5 * math.sin(HoloShieldState.JitterAngle * 1.7)))
+                    hrp.CFrame = HoloShieldState.SavedCF + Vector3.new(math.cos(HoloShieldState.JitterAngle) * rad, yOsc, math.sin(HoloShieldState.JitterAngle) * rad)
+                    hrp.AssemblyLinearVelocity = Vector3.new(math.cos(HoloShieldState.JitterAngle) * 95, -160, math.sin(HoloShieldState.JitterAngle) * 95)
+                end
+            end
+        end
     end))
 
     AddConnection(UserInputService.JumpRequest:Connect(function()
@@ -4355,6 +4453,16 @@ do
 
     local function AttachCharacterListeners(char)
         if not char then return end
+        table.clear(App.WorldCache.LocalParts)
+        table.clear(App.WorldCache.LocalCollideOrig)
+        NoclipApplied = false
+        for _, d in ipairs(char:GetDescendants()) do
+            if d:IsA("BasePart") then table.insert(App.WorldCache.LocalParts, d) end
+        end
+        AddConnection(char.DescendantAdded:Connect(function(d)
+            if d:IsA("BasePart") then table.insert(App.WorldCache.LocalParts, d) end
+        end))
+
         task.spawn(function()
             local hum = char:WaitForChild("Humanoid", 8)
             if hum then
@@ -4530,7 +4638,7 @@ do
             State.AntiTase = true
             State.AntiFling = true
             State.ESP = true
-            ApplyGunModsAll()
+            Core.SyncAfterStateLoad()
             Notify("Preset", "Applied Anti-Ban SAFE Preset!", 2.5)
         elseif low == "legit" then
             State.AntiBanSafeMode = true
@@ -4546,13 +4654,13 @@ do
             State.MaxSpeedMode = "AlwaysSprint"
             State.AntiTase = true
             State.ESP = true
-            ApplyGunModsAll()
+            Core.SyncAfterStateLoad()
             Notify("Preset", "Applied LEGIT Closet Preset!", 2.5)
         elseif low == "rage" or low == "hvh" then
             State.AntiBanSafeMode = true
             State.HoloShield = true
-            State.ShieldMode = (low == "hvh") and "UndergroundPeek" or "Hybrid"
-            CreateHoloShield()
+            State.ShieldMode = (low == "hvh") and "UndergroundPeek" or "AntiLockDesync"
+            State.RagebotPeekShield = false
             State.AutoHvH = (low == "hvh")
             State.SilentAim = true
             State.SilentAimWallbang = true
@@ -4566,8 +4674,8 @@ do
             State.AntiTase = true
             State.AntiArrest = true
             State.ESP = true
-            ApplyGunModsAll()
-            Notify("Preset", "Applied KX " .. string.upper(low) .. " + Bullet Shield Preset!", 2.5)
+            Core.SyncAfterStateLoad()
+            Notify("Preset", "Applied KX " .. string.upper(low) .. " + Anti-Hit Shield Preset!", 2.5)
         end
     end
 
@@ -4602,6 +4710,7 @@ do
         if not State.ExpandHitbox and Core.RestoreAllHitboxes then Core.RestoreAllHitboxes() end
         if not State.OpenAllDoors and Core.RestoreAllDoors then Core.RestoreAllDoors() end
         if not State.Fly and Core.CleanupCharFly then Core.CleanupCharFly() end
+        if not State.Noclip and Core.RestoreLocalNoclip then Core.RestoreLocalNoclip() end
         if Core.ApplyFenceGodmode then Core.ApplyFenceGodmode(State.FenceGodmode) end
         if Core.SetFEInvisibleState then Core.SetFEInvisibleState(State.FEInvisible, false) end
         if UIRefs.ComboTopLeftBtn then UIRefs.ComboTopLeftBtn.Visible = State.ShowComboButton end
@@ -4609,6 +4718,7 @@ do
         if not State.ESP and Core.ESPObjects then
             for plr in pairs(Core.ESPObjects) do Core.RemovePlayerESP(plr) end
         end
+        if Core.SyncVisualUI then Core.SyncVisualUI() end
     end
 end
 
@@ -5038,25 +5148,28 @@ do
             DestroyHoloShield()
             Notify("Bullet Shield", "OFF", 2)
         elseif cmd == "shieldmode" or cmd == "smode" then
-            local m = string.lower(arg1 or "hybrid")
+            local m = string.lower(arg1 or "underground")
             local map = {
                 hybrid = "Hybrid", underground = "UndergroundPeek", undergroundpeek = "UndergroundPeek",
-                desync = "DesyncBox", desyncbox = "DesyncBox", riot = "RiotOnly",
-                riotonly = "RiotOnly", ghost = "FEGhost", feghost = "FEGhost",
+                desync = "AntiLockDesync", desyncbox = "AntiLockDesync", antilock = "AntiLockDesync", antilockdesync = "AntiLockDesync",
+                riot = "RiotOnly", riotonly = "RiotOnly", ghost = "FEGhost", feghost = "FEGhost",
             }
             if map[m] then
                 State.ShieldMode = map[m]
                 if State.HoloShield then CreateHoloShield() end
+                if Core.SyncVisualUI then Core.SyncVisualUI() end
                 Notify("Shield Mode", State.ShieldMode, 2)
             end
-        elseif cmd == "antiaim" or cmd == "desync" then
-            State.ShieldMode = "DesyncBox"
+        elseif cmd == "antiaim" or cmd == "desync" or cmd == "antilock" then
+            State.ShieldMode = "AntiLockDesync"
             State.HoloShield = true
             CreateHoloShield()
-            Notify("DesyncBox Anti-Aim", "ON", 2)
+            if Core.SyncVisualUI then Core.SyncVisualUI() end
+            Notify("AntiLock Desync", "ON", 2)
         elseif cmd == "unantiaim" or cmd == "undesync" then
-            State.ShieldMode = "Hybrid"
-            Notify("DesyncBox Anti-Aim", "OFF (Hybrid)", 2)
+            State.ShieldMode = "UndergroundPeek"
+            if Core.SyncVisualUI then Core.SyncVisualUI() end
+            Notify("AntiLock Desync", "Switched to UndergroundPeek", 2)
         elseif cmd == "spinblock" then
             State.ShieldSpinBlock = ParseToggleArg(arg1, State.ShieldSpinBlock)
             Notify("Shield Spin-Block", State.ShieldSpinBlock and "ON" or "OFF", 2)
@@ -5386,15 +5499,32 @@ Env.PrisonLife2026Running = true
 do
     if WindUI then
         local Window = WindUI:CreateWindow({
-            Title = "Prison Life • 2026 Hub (v5.0 Architect Pro)",
+            Title = "Prison Life • 2026 Hub (v6.0 Refined Pro)",
             Icon = "shield",
-            Author = "Clutter-Free KX • Pooled Scheduler & JSON Configs",
-            Folder = "PrisonLife2026HubV5",
+            Author = "Non-Blocking Shield • Pooled Scheduler • JSON Profiles",
+            Folder = "PrisonLife2026HubV6",
             Size = UDim2.fromOffset(590, 440),
             Transparent = true,
             Theme = "Dark",
             SideBarWidth = 170,
         })
+
+        UIRefs.Controls = UIRefs.Controls or {}
+        UIRefs.IsSyncing = false
+        local function BindCtrl(key, ctrl)
+            if ctrl then UIRefs.Controls[key] = ctrl end
+            return ctrl
+        end
+        function Core.SyncVisualUI()
+            if UIRefs.IsSyncing then return end
+            UIRefs.IsSyncing = true
+            for key, ctrl in pairs(UIRefs.Controls) do
+                if State[key] ~= nil and ctrl and ctrl.Set then
+                    pcall(function() ctrl:Set(State[key]) end)
+                end
+            end
+            UIRefs.IsSyncing = false
+        end
 
         Window:EditOpenButton({
             Title = "🚔 PL 2026 Pro",
@@ -5418,19 +5548,20 @@ do
 
         -- // TAB 1: SHIELD & SAFE
         TabShield:Section({ Title = "🛡️ Anti-Ban Safe Mode & Quick Presets" })
-        TabShield:Toggle({
+        BindCtrl("AntiBanSafeMode", TabShield:Toggle({
             Title = "Anti-Ban Safe Mode (Error Code 600 Guard • ON)",
             Desc = "Enforces 2026 server-safe FireRate, KillAura, Teleport & WalkSpeed caps",
             Value = true,
             Callback = function(v)
+                if UIRefs.IsSyncing then return end
                 State.AntiBanSafeMode = v
                 ApplyGunModsAll()
                 Notify("Anti-Ban", v and "Safe Mode ON" or "Safe Mode OFF", 2.5)
             end,
-        })
+        }))
         TabShield:Dropdown({
             Title = "Configuration Preset",
-            Values = { "Safe (Anti-Ban Default)", "Legit (Closet)", "Rage (360 + Shield)", "HvH (AutoHvH + UndergroundPeek)" },
+            Values = { "Safe (Anti-Ban Default)", "Legit (Closet)", "Rage (AntiLock + 360)", "HvH (AutoHvH + UndergroundPeek)" },
             Value = "Safe (Anti-Ban Default)",
             Callback = function(v)
                 local p = NormalizeDropdownValue(v)
@@ -5441,75 +5572,85 @@ do
             end,
         })
 
-        TabShield:Section({ Title = "2026 5-Mode Bullet Shield (Hotkey: G)" })
-        TabShield:Toggle({
-            Title = "Enable 3D Bullet Shield & Incoming Ray Intercept",
-            Desc = "Blocks/dodges incoming enemy bullets via ReplicateEvent + RiotShieldPart",
+        TabShield:Section({ Title = "2026 Anti-Hit Shield (Hotkey: G • Zero Ray-Block)" })
+        BindCtrl("HoloShield", TabShield:Toggle({
+            Title = "Enable Anti-Hit Shield & Incoming Ray Monitor",
+            Desc = "Buried/desynced server hitbox + non-blocking feet halo (never blocks shots)",
             Value = false,
             Callback = function(v)
+                if UIRefs.IsSyncing then return end
                 State.HoloShield = v
                 if v then CreateHoloShield() else DestroyHoloShield() end
             end,
-        })
-        TabShield:Dropdown({
+        }))
+        BindCtrl("ShieldMode", TabShield:Dropdown({
             Title = "Shield Protection Mode",
-            Values = { "Hybrid", "UndergroundPeek", "DesyncBox", "RiotOnly", "FEGhost" },
-            Value = "Hybrid",
+            Values = { "UndergroundPeek", "Hybrid", "AntiLockDesync", "RiotOnly", "FEGhost" },
+            Value = "UndergroundPeek",
             Callback = function(v)
+                if UIRefs.IsSyncing then return end
                 local mode = NormalizeDropdownValue(v)
                 if mode ~= "" then
                     State.ShieldMode = mode
                     if State.HoloShield then CreateHoloShield() end
                 end
             end,
-        })
-        TabShield:Toggle({
-            Title = "Show Translucent 3D Shield Box Visual",
-            Desc = "Turn OFF to dodge bullets invisibly without a ForceField box around you",
+        }))
+        BindCtrl("ShieldDepth", TabShield:Slider({
+            Title = "Underground Burial Depth (Studs)",
+            Step = 0.5,
+            Value = { Min = 6.0, Max = 14.0, Default = 10.5 },
+            Callback = function(v) State.ShieldDepth = tonumber(v) or 10.5 end,
+        }))
+        BindCtrl("ShieldShowVisual", TabShield:Toggle({
+            Title = "Show Ground Halo Ring Visual",
+            Desc = "Sleek neon ring around your feet (CanQuery = false, never blocks aim/clicks)",
             Value = true,
             Callback = function(v) State.ShieldShowVisual = v end,
-        })
-        TabShield:Slider({
-            Title = "Shield Transparency",
+        }))
+        BindCtrl("ShieldTransparency", TabShield:Slider({
+            Title = "Halo Visual Transparency",
             Step = 0.04,
-            Value = { Min = 0.55, Max = 0.96, Default = 0.84 },
-            Callback = function(v) State.ShieldTransparency = tonumber(v) or 0.84 end,
-        })
-        TabShield:Slider({
-            Title = "3D Shield Size",
-            Step = 0.4,
-            Value = { Min = 3.0, Max = 11.0, Default = 5.4 },
-            Callback = function(v) State.ShieldSize = tonumber(v) or 5.4 end,
-        })
-        TabShield:Toggle({
-            Title = "Auto-Equip SWAT Riot Shield When Owned",
-            Value = true,
+            Value = { Min = 0.35, Max = 0.96, Default = 0.72 },
+            Callback = function(v) State.ShieldTransparency = tonumber(v) or 0.72 end,
+        }))
+        BindCtrl("ShieldSize", TabShield:Slider({
+            Title = "Ground Halo Diameter",
+            Step = 0.2,
+            Value = { Min = 2.5, Max = 10.0, Default = 4.2 },
+            Callback = function(v) State.ShieldSize = tonumber(v) or 4.2 end,
+        }))
+        BindCtrl("ShieldAutoEquip", TabShield:Toggle({
+            Title = "Auto-Equip SWAT Riot Shield When Idle",
+            Desc = "Only equips Riot Shield when not holding a firearm",
+            Value = false,
             Callback = function(v) State.ShieldAutoEquip = v end,
-        })
-        TabShield:Toggle({
+        }))
+        BindCtrl("ShieldAutoFaceShooter", TabShield:Toggle({
             Title = "Auto-Face Nearest Armed Shooter",
             Value = false,
             Callback = function(v) State.ShieldAutoFaceShooter = v end,
-        })
-        TabShield:Toggle({
+        }))
+        BindCtrl("ShieldSpinBlock", TabShield:Toggle({
             Title = "Spin-Block Anti-Aim",
             Value = false,
             Callback = function(v) State.ShieldSpinBlock = v end,
-        })
-        TabShield:Slider({
-            Title = "DesyncBox Jitter Radius",
+        }))
+        BindCtrl("DesyncJitterRadius", TabShield:Slider({
+            Title = "AntiLock Desync Jitter Radius",
             Step = 0.5,
-            Value = { Min = 1.5, Max = 7.5, Default = 5.5 },
+            Value = { Min = 1.5, Max = 9.0, Default = 5.5 },
             Callback = function(v) State.DesyncJitterRadius = tonumber(v) or 5.5 end,
-        })
+        }))
 
         -- // TAB 2: HVH & AIM
         TabCombat:Section({ Title = "⚔️ KX AutoHvH & 360° Ragebot (Hotkeys: H / B)" })
-        TabCombat:Toggle({
+        BindCtrl("AutoHvH", TabCombat:Toggle({
             Title = "AutoHvH Mode (Threat Priority + Shield + Anti-Stun)",
             Desc = "Prioritizes armed exploiters, auto-switches loaded guns & dodges shots",
             Value = false,
             Callback = function(v)
+                if UIRefs.IsSyncing then return end
                 State.AutoHvH = v
                 if v then
                     State.HoloShield = true
@@ -5517,63 +5658,65 @@ do
                     SetupGunControllerHooks()
                 end
             end,
-        })
-        TabCombat:Toggle({
+        }))
+        BindCtrl("HvHTargetExploitersFirst", TabCombat:Toggle({
             Title = "Prioritize Exploiters & Cheaters First",
             Desc = "Targets Anomaly-flagged speed/TP/spin/invis players first in HvH",
             Value = true,
             Callback = function(v) State.HvHTargetExploitersFirst = v end,
-        })
-        TabCombat:Toggle({
+        }))
+        BindCtrl("AutoHvHReactiveEvade", TabCombat:Toggle({
             Title = "Reactive Auto-Evade Incoming Shooters",
             Desc = "Automatically faces & ducks attackers detected via ReplicateEvent",
             Value = true,
             Callback = function(v) State.AutoHvHReactiveEvade = v end,
-        })
-        TabCombat:Toggle({
+        }))
+        BindCtrl("Ragebot", TabCombat:Toggle({
             Title = "360° Ragebot (Auto-Shoot Hostile Targets)",
             Value = false,
             Callback = function(v)
+                if UIRefs.IsSyncing then return end
                 State.Ragebot = v
                 if v then SetupGunControllerHooks() end
             end,
-        })
-        TabCombat:Toggle({
+        }))
+        BindCtrl("RagebotAutoSwitch", TabCombat:Toggle({
             Title = "Ragebot Auto-Switch Loaded Firearm",
             Value = true,
             Callback = function(v) State.RagebotAutoSwitch = v end,
-        })
-        TabCombat:Toggle({
-            Title = "Ragebot Shield-Peek",
-            Value = true,
+        }))
+        BindCtrl("RagebotPeekShield", TabCombat:Toggle({
+            Title = "Ragebot Un-Duck Peek (Leaves You Vulnerable — Off Recommended)",
+            Value = false,
             Callback = function(v) State.RagebotPeekShield = v end,
-        })
-        TabCombat:Slider({
+        }))
+        BindCtrl("RagebotRate", TabCombat:Slider({
             Title = "Ragebot Fire Rate (SPS)",
             Value = { Min = 2, Max = 25, Default = 14 },
             Callback = function(v) State.RagebotRate = tonumber(v) or 14 end,
-        })
+        }))
 
         TabCombat:Section({ Title = "2026 Bullet-Hook Silent Aim & Wallbang Scanner" })
-        TabCombat:Toggle({
+        BindCtrl("SilentAim", TabCombat:Toggle({
             Title = "Silent Aim (GunController Bullet Hook)",
             Value = false,
             Callback = function(v)
+                if UIRefs.IsSyncing then return end
                 State.SilentAim = v
                 if v then SetupGunControllerHooks() end
             end,
-        })
-        TabCombat:Toggle({
+        }))
+        BindCtrl("SilentAimWallbang", TabCombat:Toggle({
             Title = "Wallbang Origin Scanner (Shoot Around Cover)",
             Value = true,
             Callback = function(v) State.SilentAimWallbang = v end,
-        })
-        TabCombat:Toggle({
+        }))
+        BindCtrl("AutoArmorPen", TabCombat:Toggle({
             Title = "Auto Armor Penetration (Force Headshot on Vests)",
             Value = true,
             Callback = function(v) State.AutoArmorPen = v end,
-        })
-        TabCombat:Dropdown({
+        }))
+        BindCtrl("SilentAimAimPart", TabCombat:Dropdown({
             Title = "Target Body Part",
             Values = { "Head", "Torso", "Random" },
             Value = "Head",
@@ -5584,37 +5727,38 @@ do
                     State.AimAssistAimPart = (part == "Random") and "Head" or part
                 end
             end,
-        })
-        TabCombat:Slider({
+        }))
+        BindCtrl("SilentAimFOV", TabCombat:Slider({
             Title = "Silent Aim FOV Radius",
             Value = { Min = 30, Max = 450, Default = 180 },
             Callback = function(v) State.SilentAimFOV = tonumber(v) or 180 end,
-        })
-        TabCombat:Toggle({
+        }))
+        BindCtrl("SilentAimShowFOV", TabCombat:Toggle({
             Title = "Show Silent Aim FOV Circle",
             Value = true,
             Callback = function(v) State.SilentAimShowFOV = v end,
-        })
-        TabCombat:Toggle({
+        }))
+        BindCtrl("SilentAimHostileCheck", TabCombat:Toggle({
             Title = "Guard Safe Mode (Strictly Hostile Only — Prevents Innocent Kick)",
             Value = true,
             Callback = function(v) State.SilentAimHostileCheck = v end,
-        })
+        }))
 
         TabCombat:Section({ Title = "Aim Assist, Triggerbot, Kill Aura & Hitboxes" })
-        TabCombat:Toggle({
+        BindCtrl("AimAssist", TabCombat:Toggle({
             Title = "Smooth Aim Assist (PC & Mobile Touch)",
             Value = false,
             Callback = function(v) State.AimAssist = v end,
-        })
-        TabCombat:Toggle({
+        }))
+        BindCtrl("Triggerbot", TabCombat:Toggle({
             Title = "Triggerbot (Auto-Shoot in FOV)",
             Value = false,
             Callback = function(v)
+                if UIRefs.IsSyncing then return end
                 State.Triggerbot = v
                 if v then SetupGunControllerHooks() end
             end,
-        })
+        }))
         TabCombat:Toggle({
             Title = "Shoot Through Riot Shields & Vehicles",
             Value = false,
@@ -5623,24 +5767,25 @@ do
                 State.VehicleWallbang = v
             end,
         })
-        TabCombat:Toggle({
+        BindCtrl("KillAura", TabCombat:Toggle({
             Title = "Melee Kill Aura (Anti-Ban Rate-Limited)",
             Value = false,
             Callback = function(v) State.KillAura = v end,
-        })
-        TabCombat:Slider({
+        }))
+        BindCtrl("KillAuraRange", TabCombat:Slider({
             Title = "Kill Aura Range (Studs)",
             Value = { Min = 4, Max = 12, Default = 10 },
             Callback = function(v) State.KillAuraRange = tonumber(v) or 10 end,
-        })
-        TabCombat:Toggle({
+        }))
+        BindCtrl("ExpandHitbox", TabCombat:Toggle({
             Title = "Expand Enemy Hitboxes (Invisible Box)",
             Value = false,
             Callback = function(v)
+                if UIRefs.IsSyncing then return end
                 State.ExpandHitbox = v
                 if not v then Core.RestoreAllHitboxes() end
             end,
-        })
+        }))
         TabCombat:Slider({
             Title = "Hitbox Size",
             Value = { Min = 3, Max = 15, Default = 9 },
@@ -5671,11 +5816,11 @@ do
             Value = true,
             Callback = function(v) State.ComboAutoGrabGuns = v end,
         })
-        TabWeapons:Toggle({
+        BindCtrl("ComboReEquipShield", TabWeapons:Toggle({
             Title = "Re-Equip Riot Shield After .combo1 Burst",
-            Value = true,
+            Value = false,
             Callback = function(v) State.ComboReEquipShield = v end,
-        })
+        }))
 
         TabWeapons:Section({ Title = "2026 Safe Weapon & Melee Grabber" })
         TabWeapons:Button({
@@ -5921,10 +6066,11 @@ do
 
         -- // TAB 6: MOVEMENT
         TabMove:Section({ Title = "2026 Anti-Rubberband Speed & Noclip (Hotkey: N)" })
-        TabMove:Toggle({
+        BindCtrl("MaxSpeed", TabMove:Toggle({
             Title = "MaxSpeed (20 Indoor Sub-Regions Anti-Rubberband)",
             Value = false,
             Callback = function(v)
+                if UIRefs.IsSyncing then return end
                 State.MaxSpeed = v
                 if v then
                     Core.BypassClientAntiNoclip()
@@ -5934,8 +6080,8 @@ do
                     if hum then hum.WalkSpeed = State.AlwaysSprint and 24 or 16 end
                 end
             end,
-        })
-        TabMove:Dropdown({
+        }))
+        BindCtrl("MaxSpeedMode", TabMove:Dropdown({
             Title = "Speed Mode",
             Values = { "RegionSafe", "Custom", "AlwaysSprint" },
             Value = "RegionSafe",
@@ -5943,13 +6089,13 @@ do
                 local mode = NormalizeDropdownValue(v)
                 if mode ~= "" then State.MaxSpeedMode = mode end
             end,
-        })
-        TabMove:Slider({
+        }))
+        BindCtrl("CustomWalkSpeed", TabMove:Slider({
             Title = "Custom WalkSpeed",
             Value = { Min = 16, Max = 92, Default = 40 },
             Callback = function(v) State.CustomWalkSpeed = tonumber(v) or 40 end,
-        })
-        TabMove:Toggle({
+        }))
+        BindCtrl("JumpPowerEnabled", TabMove:Toggle({
             Title = "JumpPower Boost",
             Value = false,
             Callback = function(v)
@@ -5959,12 +6105,12 @@ do
                     if hum then hum.JumpPower = 50 end
                 end
             end,
-        })
-        TabMove:Slider({
+        }))
+        BindCtrl("JumpPower", TabMove:Slider({
             Title = "Custom JumpPower",
             Value = { Min = 50, Max = 110, Default = 65 },
             Callback = function(v) State.JumpPower = tonumber(v) or 65 end,
-        })
+        }))
         TabMove:Toggle({
             Title = "No Jump Cooldown & Infinite Jump",
             Value = false,
@@ -5975,32 +6121,35 @@ do
                 if LocalPlayer.Character then Core.BypassAntiJump(LocalPlayer.Character, v) end
             end,
         })
-        TabMove:Toggle({
-            Title = "Noclip (Non-Destructive)",
+        BindCtrl("Noclip", TabMove:Toggle({
+            Title = "Noclip (Non-Destructive + Clean Restore)",
             Value = false,
             Callback = function(v)
+                if UIRefs.IsSyncing then return end
                 State.Noclip = v
-                if v then Core.BypassClientAntiNoclip() end
+                if v then Core.BypassClientAntiNoclip()
+                elseif Core.RestoreLocalNoclip then Core.RestoreLocalNoclip() end
             end,
-        })
-        TabMove:Toggle({
+        }))
+        BindCtrl("AntiKillPlane", TabMove:Toggle({
             Title = "Anti-KillPlane",
             Value = true,
             Callback = function(v) State.AntiKillPlane = v end,
-        })
+        }))
 
         -- // TAB 7: ESP & ADMIN
         TabVisuals:Section({ Title = "Role-Colored Player ESP & Clean VFX" })
-        TabVisuals:Toggle({
+        BindCtrl("ESP", TabVisuals:Toggle({
             Title = "Enable Player ESP",
             Value = false,
             Callback = function(v)
+                if UIRefs.IsSyncing then return end
                 State.ESP = v
                 if not v then
                     for plr in pairs(Core.ESPObjects) do Core.RemovePlayerESP(plr) end
                 end
             end,
-        })
+        }))
         TabVisuals:Toggle({
             Title = "Hide Teammates from ESP",
             Value = false,
@@ -6211,7 +6360,7 @@ do
         TitleBar.TextSize = 14
         TitleBar.TextColor3 = Color3.new(1, 1, 1)
         TitleBar.TextXAlignment = Enum.TextXAlignment.Left
-        TitleBar.Text = "🚔 Prison Life 2026 Pro (v5.0)"
+        TitleBar.Text = "🚔 Prison Life 2026 Pro (v6.0)"
         TitleBar.Parent = FallbackFrame
 
         local Scroll = Instance.new("ScrollingFrame")
@@ -6306,4 +6455,4 @@ Env.PrisonLife2026Cleanup = function()
 end
 
 App.Persistence.TryAutoLoad()
-Notify("Prison Life • 2026 Pro v5.0", "Loaded Architect KX Edition (Pooled VFX + Signature Hooks + Profiles)!", 3.5)
+Notify("Prison Life • 2026 Pro v6.0", "Loaded Refined KX Edition (Non-Blocking Anti-Hit Shield + Pooled Engine)!", 3.5)

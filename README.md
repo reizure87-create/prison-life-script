@@ -1,4 +1,4 @@
-# 🚔 Prison Life — Ultimate 2026 Script (PC & Mobile) [v5.0 Architect KX Pro]
+# 🚔 Prison Life — Ultimate 2026 Script (PC & Mobile) [v6.0 Refined KX Pro Edition]
 
 Complete, anti-ban-hardened script for **Roblox Prison Life** (`PlaceId: 155615604`), engineered for the **Late 2026 ("Sniper Update!")** client/server architecture (`M700`, `Revolver`, `Light Vest`). Built with a clean 7-tab **WindUI** menu (plus a built-in **Native PC/Mobile Touch GUI Fallback**) and a **clutter-free HUD**.
 
@@ -9,37 +9,32 @@ loadstring(game:HttpGet("https://raw.githubusercontent.com/reizure87-create/pris
 
 ---
 
-## 🛠️ What Was Upgraded in v5.0 (Architectural Video Analysis + Gameplay Test + KX Research)
+## 🛠️ What Was Refined in v6.0
 
-1. **Centralized Scheduler, Event-Driven `WorldCache` & Circular VFX Pooling**:
-   - Consolidated polling loops into a single `Heartbeat` scheduler (`App.Scheduler`) gated by `os.clock()` deltas and sharing **one per-tick `Players` snapshot** across ESP, Anomaly Detection, Aim/Ragebot, KillAura, and AutoArrest.
-   - Replaced per-frame `GetDescendants()` and `Workspace:GetChildren()` scans with event-driven `WorldCache` tables (`CarCache`, `DoorCache`, `FenceCache`, `DroppedItemCache`, `GiverCache`, `PlayerCache`) updated via `ChildAdded` / `DescendantAdded` / `CollectionService`.
-   - Replaced runtime `Instance.new` / `:Destroy()` VFX churn with **pre-allocated circular Object Pools** (`32` neon bullet tracers, `14` damage number billboards, `10` shield impact sparks parked off-world at `(0, -9000, 0)`).
-2. **Future-Proof Dynamic Type-Signature `GunController` Hooks + 2026 Sniper Update**:
-   - Upgraded `SetupGunControllerHooks` to inspect closure constants (`Raycast`, `canBeDamaged`, `Local_ReloadSession`, `Local_IsShooting`) and upvalue types (`RaycastParams`, `GunData`) dynamically (`ActionArea` + `CharacterAdded` + `getgc` fallback), eliminating brittle fixed upvalue-index lookups.
-   - Added full `M700` Sniper & `Revolver` grab/command/combo support (`.m700` / `.sniper`, `.revolver`) plus `Zero Sniper / Taser ChargeTime Delay` in Gun Mods.
-3. **Fixed UndergroundPeek Camera Drop, Car-Bring Upside-Down Flip & Mobile Hotbar Overlap**:
-   - Restores standing `CFrame` via `RunService:BindToRenderStep` at `RenderPriority.Camera.Value - 15` (`185` < Camera `200`) so `UndergroundPeek` and `DesyncBox` **never** snap or flip your camera into the floor or sky.
-   - Fixed `.bring` / `.forcecrim` / `.void` vehicle manipulation (`flat` upright yaw pivot, locked `passSeat` offset, non-wheel collision suppress during scoop, linear + angular velocity zeroing, safe `+3.0` stud arrival height).
-   - Adjusted the bottom Shield/Arrest status strip offset (`-88` on mobile) so it sits cleanly above the 3-slot hotbar.
-4. **Distance-Sorted 30-Highlight Budget, LOD ESP & Grace-Hardened Anti-Exploiter Suite**:
-   - Sorts players by nearest distance before allocating `Highlight` instances (strictly within Roblox's `30` Highlight limit alongside `C4ESP`), and collapses distant player tags beyond `ESPDetailDistance` (`140m`) into compact `◆ 185m` diamond LOD pips.
-   - Added 3s grace windows (`CharacterAdded`, `Team` change, `Arrested`/`Tased` transitions, and lag spikes `dt > 0.45s`) to eliminate false-positive Speed/TP alerts; confirmed cheaters, FE-Invis, and active `ReplicateEvent` shooters receive priority focus in `AutoHvH`, reactive shield auto-evade, and `ToolArbiter` conflict-free tool switching.
-5. **Embedded JSON Persistence & Named Config Profiles**:
-   - Save, load, delete, list, and auto-load named JSON profiles under `PrisonLife2026Hub/profiles/<name>.json` (`HttpService` with pure-Lua JSON encoder/decoder fallback; `.savecfg`, `.loadcfg`, `.delcfg`, `.configs`, `.autoload`).
+1. **Fixed Anti-Hit Shield (No More Getting Hit + Zero Ray/Movement Blocking)**:
+   - **Zero Ray-Block**: Replaced the intrusive `CanQuery = true` box sitting in front of your face/crosshair with a sleek non-blocking **ground halo ring around your feet** (`CanQuery = false`, `CanCollide = false` always) — never blocks your own gunshots, cursor clicks, prompts, or camera view.
+   - **Never Disables Protection**: Removed the fake 3.8s `BrokenUntil` shield shutdown on incoming gunfire, removed the 90ms Ragebot standing gap (`RagebotPeekShield = false` default), and fixed `Hybrid` so holding a Riot Shield no longer turns off Underground/Desync protection or forcefully unequips your firearm.
+   - **Final-Heartbeat Network Timing + `-10.5` Burial Depth**: Buries/desyncs your outgoing `CFrame` + velocity (`UndergroundPeek`, `Hybrid`, `AntiLockDesync`) at the very end of `Heartbeat` **after** `KillAura`, `AutoArrest`, `AutoTaze`, `AutoPickupDropped`, and movement finish measuring from your standing position, and restores exact `SavedCF` + `SavedVel` cleanly at `RenderPriority.Camera.Value - 15` (`185`).
+   - **Restored Shoot Origin**: `FireToolAtTarget` + `GunHook.Bullet` normalize origin back to standing `SavedCF` so your bullets never hit the underside of the floor while shielded.
+2. **Smooth 3D Fly, Cached Noclip Restore, ShotToken & Team Switch Refinements**:
+   - Fixed `Character Fly` downward clamping (`math.max(vel.Y, 0)`), removed gravity flutter while hovering/diving, added camera-pitched 3D flight + subtle `Vehicle Fly` hover compensation.
+   - Added cached `LocalParts` Noclip collision restoration when toggled OFF, `ShotToken` overlap guard in `FireToolAtTarget` for rapid Ragebot/.combo1 fire, `ToolArbiter` lock during `GrabWeapons`, `LocalPlayer.Team` polling in `SwitchToTeam("Criminals")`, and timeout-safe `PerformFastRespawn()`.
+   - Added WindUI control syncing (`BindCtrl` + `Core.SyncVisualUI()`) so `.preset` and JSON `.loadcfg` visually sync UI controls immediately.
 
 ---
 
-## ✨ Core Features & Commands
-- **Clutter-Free Mobile & PC HUD**: Top-left draggable `⚡ .combo1` pill, top-right collapsible `⌘ CMD` pill with autocomplete, top-left 3-line mini-killfeed & anomaly feed, contextual Fly `▲` / `▼` buttons, and bottom Shield durability / Arrest cooldown bars.
-- **Anti-Ban Safe Mode (`Error Code 600` Guard • ON by default)**: Enforces `Hostile == true`-only lethal guard targeting, 20-subregion Indoor SafeSpeed (`32 / 50 / 92`), `15 SPS` FireRate cap, `10m` KillAura/Arrest range, and non-destructive `getconnections` signal bypassing.
-- **KX Admin Commands**: `.savecar [1..5]`, `.bring <plr>`, `.forcecrim <plr|all>`, `.void <plr>`, `.fling <plr>`, `.autohvh`, `.evade`, `.wheelaura`, `.combo1`, `.loopcombo`, `.shield`, `.shieldmode <mode>`, `.m700`, `.revolver`, `.hammer`, `.knife`, `.guns`, `.savecfg <name>`, `.loadcfg <name>`, `.preset <safe|legit|rage|hvh>`.
+## 🛠️ Architecture & Performance Highlights (v5.0 + v6.0)
+- **Single Centralized Scheduler & `WorldCache`**: Consolidated loops into `Heartbeat` (`os.clock()` gated) with one shared `Players` snapshot per tick + event-driven `Cars`, `Doors`, `Fences`, `Dropped`, `Players`, and `Givers` caches (`0` per-frame `GetDescendants()` workspace scans).
+- **Pre-Allocated Circular VFX Pools**: `32` bullet tracers, `14` floating damage numbers, and `10` shield sparks parked off-world at `(0, -9000, 0)`.
+- **Dynamic Signature `GunController` Hooks + 2026 Sniper Support**: Upvalue type/constant scanner (`RaycastParams`, `Local_ReloadSession`, `getgc` fallback), `M700` & `Revolver` grab/commands (`.m700`, `.sniper`, `.revolver`), and `Zero Sniper / Taser ChargeTime Delay`.
+- **Distance-Sorted 30-Highlight LOD ESP & Grace-Hardened Anomalies**: Closest `30` players keep `Highlight` chams while distant targets collapse to `◆ 185m` LOD pips (`ESPDetailDistance`); 3s spawn/team/arrest/lag grace windows isolate confirmed cheaters (`[CHEAT]`) for priority targeting & reactive shooter evade.
+- **Embedded JSON Persistence & Config Profiles**: Save, load, delete, and auto-load named JSON config profiles under `PrisonLife2026Hub/profiles/<name>.json`.
 
 ---
 
 ## ⌨️ Default PC Hotkeys
 - **`RightShift`** — Toggle WindUI Hub Window
-- **`G`** — Toggle 5-Mode 3D Bullet Shield
+- **`G`** — Toggle Anti-Hit Shield
 - **`H`** — Toggle AutoHvH Mode
 - **`X`** — Execute `.combo1` Multi-Gun Burst
 - **`B`** — Toggle 360° Ragebot

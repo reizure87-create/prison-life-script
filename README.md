@@ -1,4 +1,4 @@
-# 🚔 Prison Life — Ultimate 2026 Script (PC & Mobile) [v6.0 Refined KX Pro Edition]
+# 🚔 Prison Life — Ultimate 2026 Script (PC & Mobile) [v7.0 Apex KX Pro Edition]
 
 Complete, anti-ban-hardened script for **Roblox Prison Life** (`PlaceId: 155615604`), engineered for the **Late 2026 ("Sniper Update!")** client/server architecture (`M700`, `Revolver`, `Light Vest`). Built with a clean 7-tab **WindUI** menu (plus a built-in **Native PC/Mobile Touch GUI Fallback**) and a **clutter-free HUD**.
 
@@ -9,25 +9,28 @@ loadstring(game:HttpGet("https://raw.githubusercontent.com/reizure87-create/pris
 
 ---
 
-## 🛠️ What Was Refined in v6.0
+## 🚀 What's New in v7.0 (Apex KX Pro Overhaul)
 
-1. **Fixed Anti-Hit Shield (No More Getting Hit + Zero Ray/Movement Blocking)**:
-   - **Zero Ray-Block**: Replaced the intrusive `CanQuery = true` box sitting in front of your face/crosshair with a sleek non-blocking **ground halo ring around your feet** (`CanQuery = false`, `CanCollide = false` always) — never blocks your own gunshots, cursor clicks, prompts, or camera view.
-   - **Never Disables Protection**: Removed the fake 3.8s `BrokenUntil` shield shutdown on incoming gunfire, removed the 90ms Ragebot standing gap (`RagebotPeekShield = false` default), and fixed `Hybrid` so holding a Riot Shield no longer turns off Underground/Desync protection or forcefully unequips your firearm.
-   - **Final-Heartbeat Network Timing + `-10.5` Burial Depth**: Buries/desyncs your outgoing `CFrame` + velocity (`UndergroundPeek`, `Hybrid`, `AntiLockDesync`) at the very end of `Heartbeat` **after** `KillAura`, `AutoArrest`, `AutoTaze`, `AutoPickupDropped`, and movement finish measuring from your standing position, and restores exact `SavedCF` + `SavedVel` cleanly at `RenderPriority.Camera.Value - 15` (`185`).
-   - **Restored Shoot Origin**: `FireToolAtTarget` + `GunHook.Bullet` normalize origin back to standing `SavedCF` so your bullets never hit the underside of the floor while shielded.
-2. **Smooth 3D Fly, Cached Noclip Restore, ShotToken & Team Switch Refinements**:
-   - Fixed `Character Fly` downward clamping (`math.max(vel.Y, 0)`), removed gravity flutter while hovering/diving, added camera-pitched 3D flight + subtle `Vehicle Fly` hover compensation.
-   - Added cached `LocalParts` Noclip collision restoration when toggled OFF, `ShotToken` overlap guard in `FireToolAtTarget` for rapid Ragebot/.combo1 fire, `ToolArbiter` lock during `GrabWeapons`, `LocalPlayer.Team` polling in `SwitchToTeam("Criminals")`, and timeout-safe `PerformFastRespawn()`.
-   - Added WindUI control syncing (`BindCtrl` + `Core.SyncVisualUI()`) so `.preset` and JSON `.loadcfg` visually sync UI controls immediately.
+1. **Zero Connection Leaks & Self-Healing Weapon Hooks**:
+   - **Scoped Listeners (`App.CreateScope`)**: Remote player tracking, car parts, and local character/backpack spawn hooks clean up cleanly across every respawn and unload (`Env.PrisonLife2026Cleanup`). Fixed `WatchTargetHitDamage` so transient health listeners never accumulate in `Connections`.
+   - **Live Camera & 4-Source `GunController` Hooking**: Updates `Camera` dynamically via `Workspace:GetPropertyChangedSignal("CurrentCamera")`, scores closure candidates across `ActionArea.InputBegan` (Mobile), `UserInputService.InputBegan` (PC), `CharacterAdded`, and `getgc`, adds `.rehook` manual recovery, self-healing `__namecall` Raycast fallback (active only until `BulletHookFiredCount >= 1`), velocity lead compensation (`SilentAimLead`), and `ActionArea`-centered synthetic firing.
+2. **Mobile & PC HUD Polish**:
+   - **Drag-Guarded Viewport-Clamped Pills**: `.combo1` and `⌘ CMD` track `WasDraggedAt` so dragging never triggers accidental `.Activated` taps and never goes off-screen.
+   - **Mobile Ergonomics**: Top-center mobile Command Bar & Autocomplete dropdown (with race-free tap handling), `TextChatService` + `Chatted` dual command listeners, and jump-adjacent circular Fly Up/Down buttons with stuck-touch protection.
+3. **Complete Defense, Combat & ESP Upgrades**:
+   - **`AntiCarBring` Protection**: Disables `CanTouch` on foreign passenger `Seat`s and immediately ejects forced kidnapping while preserving normal driving.
+   - **Fixed `HoloShield` Pre-Rotation `SavedCF` & Styles**: Captures standing pose before `ShieldAutoFaceShooter`/`ShieldSpinBlock` so server packets desync without spinning your camera; adds `CyberHex`, `NeonRing`, and `Minimal` `ShieldVisualStyle`s (`CanQuery = false` always).
+   - **Non-Yielding `AutoArmor` & Crowd `AutoArrest`**: Caches armor givers and spawns `InvokeServer` asynchronously; uses per-target `AutoArrest` cooldowns + auto-cuff equip, 1-arg `MeleeEvent`, optional `KillAuraAutoMelee`, and Ragebot auto-reload.
+   - **Upgraded ESP**: 3px billboard health bars, Guard-aware threat colors for Inmates (crimson Hostile vs amber Trespassing vs cool gray Innocent), `.target` focus highlighting, and dropped `ItemESP` (weapons & keycards).
+4. **Full KX Command Parity & Loadout Kits**:
+   - Multi-target batch `.fc`/`.bring`/`.void`/`.fling`, `.target`/`.untarget`, `.loadout <light|sniper|riot|full>`, `.refill`, `.rehook`, `.anticarbring`, `.itemesp`, `.status`, `.shieldstyle`, plus working `.fencegod`/`.noclip`/`.esp` toggles synced directly with WindUI.
 
 ---
 
-## 🛠️ Architecture & Performance Highlights (v5.0 + v6.0)
-- **Single Centralized Scheduler & `WorldCache`**: Consolidated loops into `Heartbeat` (`os.clock()` gated) with one shared `Players` snapshot per tick + event-driven `Cars`, `Doors`, `Fences`, `Dropped`, `Players`, and `Givers` caches (`0` per-frame `GetDescendants()` workspace scans).
+## 🛠️ Core Architecture
+- **Single Centralized Scheduler & `WorldCache`**: Pooled `Heartbeat` scheduler sharing one `Players` snapshot + event-driven `Cars`, `Doors`, `Fences`, `ArmorParts`, `Dropped`, `Players`, and `Givers` caches (`0` per-frame `GetDescendants()` workspace scans).
 - **Pre-Allocated Circular VFX Pools**: `32` bullet tracers, `14` floating damage numbers, and `10` shield sparks parked off-world at `(0, -9000, 0)`.
-- **Dynamic Signature `GunController` Hooks + 2026 Sniper Support**: Upvalue type/constant scanner (`RaycastParams`, `Local_ReloadSession`, `getgc` fallback), `M700` & `Revolver` grab/commands (`.m700`, `.sniper`, `.revolver`), and `Zero Sniper / Taser ChargeTime Delay`.
-- **Distance-Sorted 30-Highlight LOD ESP & Grace-Hardened Anomalies**: Closest `30` players keep `Highlight` chams while distant targets collapse to `◆ 185m` LOD pips (`ESPDetailDistance`); 3s spawn/team/arrest/lag grace windows isolate confirmed cheaters (`[CHEAT]`) for priority targeting & reactive shooter evade.
+- **Distance-Sorted 30-Highlight LOD ESP & Grace-Hardened Anomalies**: Closest `30` players keep `Highlight` chams while distant targets collapse to `◆ 185m` LOD pips (`ESPDetailDistance`).
 - **Embedded JSON Persistence & Config Profiles**: Save, load, delete, and auto-load named JSON config profiles under `PrisonLife2026Hub/profiles/<name>.json`.
 
 ---
@@ -40,4 +43,4 @@ loadstring(game:HttpGet("https://raw.githubusercontent.com/reizure87-create/pris
 - **`B`** — Toggle 360° Ragebot
 - **`F`** — Toggle Character Fly
 - **`N`** — Toggle Noclip
-- **`;` (`Semicolon`)** — Open & Focus Top-Right Command Bar
+- **`;` (`Semicolon`)** — Open & Focus Command Bar

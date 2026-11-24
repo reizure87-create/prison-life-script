@@ -1,20 +1,21 @@
 --[[
     ================================================================================
-    🚔 PRISON LIFE — ULTIMATE 2026 SCRIPT (PC & MOBILE) [v7.0 APEX KX PRO EDITION]
+    🚔 PRISON LIFE — ULTIMATE 2026 SCRIPT (PC & MOBILE) [v7.1 APEX KX PRO EDITION]
     ================================================================================
     Target Game : Prison Life (PlaceId: 155615604 | UniverseId: 73885730)
     Patch Target: Late 2026 ("Sniper Update!" — M700, Revolver, Light Vest, Remotes)
     Platform    : PC (Keyboard/Mouse + Hotkeys) & Mobile (Clean Clutter-Free HUD)
     UI Library  : Clean 7-Tab WindUI (with Built-In Native Touch/PC UI Fallback)
 
-    Upgrades in v7.0 (Apex KX Pro Overhaul):
+    Upgrades in v7.0 + v7.1 (Apex KX Pro):
       1. Zero Connection Leaks & Self-Healing Hooks:
          - Scoped Player/Character lifecycle listeners (`App.CreateScope`) & Watchers.
          - Live `Workspace.CurrentCamera` updater, 4-source PC+Mobile `GunController`
            hooking with `.rehook` recovery & live `Bullet` hook verification, plus
            `ActionArea`-centered synthetic firing (`SilentAimLead` prediction).
       2. Mobile & PC HUD Polish:
-         - Drag-guarded HUD pills (`WasDraggedAt`) clamped safely inside viewport.
+         - Drag-guarded HUD pills (`WasDraggedAt`) clamped safely inside viewport,
+           multi-touch safe dragging, and clean mobile topbar spacing (`1600x720`).
          - Top-center mobile Command Bar/Suggestions & jump-adjacent vertical Fly Pad.
       3. Complete Defense & World Awareness:
          - `AntiCarBring` passenger-seat snatch protection, non-yielding `AutoArmor`,
@@ -23,6 +24,10 @@
       4. Full KX Command Parity, Kits & TextChatService:
          - Working `.fencegod`/`.noclip`/`.esp`/batch car ops, `.target`/`.refill`/
            `.rehook`/`.anticarbring`/`.itemesp`/`.status`, Weapon Kits & `TextChatService`.
+      5. v7.1 Startup & Runtime Stability Hardening:
+         - Fixed forward references (`AddConnection`, `HoloShieldState`, `UIRefs`, `Stats`),
+           guaranteed `pcall` Fallback UI recovery, WindUI `DisplayOrder`/Tab1/Sync fixes,
+           and zero accidental globals verified by bytecode audit.
     ================================================================================
 ]]
 
@@ -49,9 +54,13 @@ local MarketplaceService = game:GetService("MarketplaceService")
 local TeleportService = game:GetService("TeleportService")
 local HttpService = game:GetService("HttpService")
 local SoundService = game:GetService("SoundService")
+local Stats = game:GetService("Stats")
 local Teams = game:GetService("Teams")
 local Workspace = game:GetService("Workspace")
-local CoreGui = game:GetService("CoreGui")
+local CoreGui = (function()
+    local ok, cg = pcall(game.GetService, game, "CoreGui")
+    return ok and cg or nil
+end)()
 local StarterGui = game:GetService("StarterGui")
 
 local LocalPlayer = Players.LocalPlayer
@@ -63,13 +72,22 @@ local Env = (getgenv and getgenv()) or _G
 if Env.PrisonLife2026Cleanup then
     pcall(Env.PrisonLife2026Cleanup)
 end
+local RunToken = {}
+Env.PrisonLife2026RunToken = RunToken
 
-local function GetSafeGuiParent()
-    local ok, hui = pcall(function() return gethui and gethui() end)
-    if ok and hui then return hui end
-    local ok2, cg = pcall(function() return CoreGui end)
-    if ok2 and cg then return cg end
-    return LocalPlayer:WaitForChild("PlayerGui")
+local function SafeParentGui(gui)
+    if not gui then return nil end
+    local candidates = {}
+    local okH, hui = pcall(function() return gethui and gethui() end)
+    if okH and hui then table.insert(candidates, hui) end
+    if CoreGui then table.insert(candidates, CoreGui) end
+    local okP, pg = pcall(function() return LocalPlayer:WaitForChild("PlayerGui", 5) end)
+    if okP and pg then table.insert(candidates, pg) end
+    for _, parent in ipairs(candidates) do
+        local okSet = pcall(function() gui.Parent = parent end)
+        if okSet and gui.Parent == parent then return parent end
+    end
+    return nil
 end
 
 local function NormalizeDropdownValue(v)
@@ -81,6 +99,20 @@ end
 
 local function Trim(s)
     return (tostring(s or ""):gsub("^%s+", ""):gsub("%s+$", ""))
+end
+
+-- // Connections & Cleanup Registry (Declared BEFORE MakeDraggable so lexical scope is valid!)
+local Connections = {}
+local CreatedInstances = {}
+local HookedFunctions = {}
+
+local function AddConnection(conn)
+    if conn then table.insert(Connections, conn) end
+    return conn
+end
+local function TrackInstance(inst)
+    if inst then table.insert(CreatedInstances, inst) end
+    return inst
 end
 
 local function MakeDraggable(guiObj)
@@ -116,8 +148,8 @@ local function MakeDraggable(guiObj)
         local maxX = math.max(minX, vp.X - sz.X * (1 - ap.X) - 4)
         local minY = sz.Y * ap.Y + 4
         local maxY = math.max(minY, vp.Y - sz.Y * (1 - ap.Y) - 4)
-        local targetX = math.clamp(startPos.X.Scale * vp.X + startPos.X.Offset + delta.X, minX, maxX)
-        local targetY = math.clamp(startPos.Y.Scale * vp.Y + startPos.Y.Offset + delta.Y, minY, maxY)
+        local targetX = clamp(startPos.X.Scale * vp.X + startPos.X.Offset + delta.X, minX, maxX)
+        local targetY = clamp(startPos.Y.Scale * vp.Y + startPos.Y.Offset + delta.Y, minY, maxY)
         guiObj.Position = UDim2.new(
             startPos.X.Scale, targetX - startPos.X.Scale * vp.X,
             startPos.Y.Scale, targetY - startPos.Y.Scale * vp.Y
@@ -126,7 +158,9 @@ local function MakeDraggable(guiObj)
 
     AddConnection(UserInputService.InputEnded:Connect(function(input)
         if not dragging then return end
-        if input == activeInput or input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        local isMatchingEnd = (input == activeInput)
+            or (activeInput and activeInput.UserInputType == Enum.UserInputType.MouseButton1 and input.UserInputType == Enum.UserInputType.MouseButton1)
+        if isMatchingEnd then
             if movedDist > 6 then
                 guiObj:SetAttribute("WasDraggedAt", os.clock())
             end
@@ -136,39 +170,45 @@ local function MakeDraggable(guiObj)
     end))
 end
 
--- // Connections & Cleanup Registry
-local Connections = {}
-local CreatedInstances = {}
-local HookedFunctions = {}
+-- // 2026 Remotes Lookup (Short 3s Wait + ChildAdded Fallback so UI never stalls 20s)
+local RemotesFolder = ReplicatedStorage:WaitForChild("Remotes", 3)
+local GunRemotesFolder = ReplicatedStorage:WaitForChild("GunRemotes", 3)
+local Remotes = {}
 
-local function AddConnection(conn)
-    if conn then table.insert(Connections, conn) end
-    return conn
+local function RefreshRemotes()
+    RemotesFolder = RemotesFolder or ReplicatedStorage:FindFirstChild("Remotes")
+    GunRemotesFolder = GunRemotesFolder or ReplicatedStorage:FindFirstChild("GunRemotes")
+    if RemotesFolder then
+        Remotes.RequestTeamChange = Remotes.RequestTeamChange or RemotesFolder:FindFirstChild("RequestTeamChange")
+        Remotes.GiverPressed      = Remotes.GiverPressed or RemotesFolder:FindFirstChild("GiverPressed")
+        Remotes.TouchGiver        = Remotes.TouchGiver or RemotesFolder:FindFirstChild("TouchGiver") or RemotesFolder:FindFirstChild("GiverTouched")
+        Remotes.InteractWithItem  = Remotes.InteractWithItem or RemotesFolder:FindFirstChild("InteractWithItem")
+        Remotes.ArrestPlayer      = Remotes.ArrestPlayer or RemotesFolder:FindFirstChild("ArrestPlayer")
+        Remotes.ClientArrested    = Remotes.ClientArrested or RemotesFolder:FindFirstChild("ClientArrested")
+        Remotes.EatFood           = Remotes.EatFood or RemotesFolder:FindFirstChild("EatFood") or RemotesFolder:FindFirstChild("SnackEaten")
+        Remotes.ShieldEquipped    = Remotes.ShieldEquipped or RemotesFolder:FindFirstChild("ShieldEquipped") or RemotesFolder:FindFirstChild("RiotShieldEquipped")
+        Remotes.MessageReceived   = Remotes.MessageReceived or RemotesFolder:FindFirstChild("MessageReceived")
+        Remotes.C4Folder          = Remotes.C4Folder or RemotesFolder:FindFirstChild("C4")
+    end
+    if GunRemotesFolder then
+        Remotes.PlayerTased       = Remotes.PlayerTased or GunRemotesFolder:FindFirstChild("PlayerTased")
+        Remotes.ReplicateEvent    = Remotes.ReplicateEvent or GunRemotesFolder:FindFirstChild("ReplicateEvent") or GunRemotesFolder:FindFirstChild("GunTracers")
+    end
+    Remotes.MeleeEvent = Remotes.MeleeEvent or ReplicatedStorage:FindFirstChild("meleeEvent")
 end
-local function TrackInstance(inst)
-    if inst then table.insert(CreatedInstances, inst) end
-    return inst
-end
+RefreshRemotes()
 
--- // 2026 Remotes Lookup (Verified from PrisonLife-Deobfuscated-API.md)
-local RemotesFolder = ReplicatedStorage:WaitForChild("Remotes", 10)
-local GunRemotesFolder = ReplicatedStorage:WaitForChild("GunRemotes", 10)
-
-local Remotes = {
-    RequestTeamChange = RemotesFolder and RemotesFolder:FindFirstChild("RequestTeamChange"),
-    GiverPressed      = RemotesFolder and RemotesFolder:FindFirstChild("GiverPressed"),
-    TouchGiver        = RemotesFolder and (RemotesFolder:FindFirstChild("TouchGiver") or RemotesFolder:FindFirstChild("GiverTouched")),
-    InteractWithItem  = RemotesFolder and RemotesFolder:FindFirstChild("InteractWithItem"),
-    ArrestPlayer      = RemotesFolder and RemotesFolder:FindFirstChild("ArrestPlayer"),
-    ClientArrested    = RemotesFolder and RemotesFolder:FindFirstChild("ClientArrested"),
-    EatFood           = RemotesFolder and (RemotesFolder:FindFirstChild("EatFood") or RemotesFolder:FindFirstChild("SnackEaten")),
-    ShieldEquipped    = RemotesFolder and (RemotesFolder:FindFirstChild("ShieldEquipped") or RemotesFolder:FindFirstChild("RiotShieldEquipped")),
-    MessageReceived   = RemotesFolder and RemotesFolder:FindFirstChild("MessageReceived"),
-    C4Folder          = RemotesFolder and RemotesFolder:FindFirstChild("C4"),
-    PlayerTased       = GunRemotesFolder and GunRemotesFolder:FindFirstChild("PlayerTased"),
-    ReplicateEvent    = GunRemotesFolder and (GunRemotesFolder:FindFirstChild("ReplicateEvent") or GunRemotesFolder:FindFirstChild("GunTracers")),
-    MeleeEvent        = ReplicatedStorage:FindFirstChild("meleeEvent"),
-}
+AddConnection(ReplicatedStorage.ChildAdded:Connect(function(ch)
+    if ch.Name == "Remotes" then
+        RemotesFolder = ch
+        task.defer(RefreshRemotes)
+    elseif ch.Name == "GunRemotes" then
+        GunRemotesFolder = ch
+        task.defer(RefreshRemotes)
+    elseif ch.Name == "meleeEvent" then
+        Remotes.MeleeEvent = ch
+    end
+end))
 
 AddConnection(Workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
     local cam = Workspace.CurrentCamera
@@ -385,6 +425,24 @@ local function Notify(title, content, duration)
         end)
     end
 end
+
+-- Shared cross-section tables & HoloShieldState (hoisted before all sections to avoid forward-ref globals)
+local Core = {}
+local Admin = {}
+local UIRefs = {}
+local HoloShieldState = {
+    Model = nil,
+    CorePart = nil,
+    HP = 180,
+    MaxHP = 180,
+    LastHit = 0,
+    DesyncActive = false,
+    SavedCF = nil,
+    SavedVel = nil,
+    JitterAngle = 0,
+    LastAttacker = nil,
+    LastAttackClock = 0,
+}
 
 -- ============================================================================
 -- // SECTION 1: CORE ARCHITECT NAMESPACE, WORLD CACHE & TARGET VALIDATION
@@ -831,7 +889,8 @@ OverlayGui.Name = "PL2026_Overlay"
 OverlayGui.IgnoreGuiInset = true
 OverlayGui.ResetOnSpawn = false
 OverlayGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-OverlayGui.Parent = GetSafeGuiParent()
+OverlayGui.DisplayOrder = 10
+SafeParentGui(OverlayGui)
 
 local SilentFOVFrame = Instance.new("Frame")
 SilentFOVFrame.Name = "SilentFOV"
@@ -1028,7 +1087,10 @@ local function TriggerHitmarkerVFX(isHeadshot, isKill)
     end
     if not State.Hitmarker then return end
 
-    local screenCenter = Vector2.new(Camera.ViewportSize.X * 0.5, Camera.ViewportSize.Y * 0.5)
+    local activeCam = Camera or Workspace.CurrentCamera
+    if not activeCam then return end
+    Camera = activeCam
+    local screenCenter = Vector2.new(activeCam.ViewportSize.X * 0.5, activeCam.ViewportSize.Y * 0.5)
     if not IsMobile and UserInputService.MouseBehavior ~= Enum.MouseBehavior.LockCenter then
         local mPos = UserInputService:GetMouseLocation()
         screenCenter = Vector2.new(mPos.X, mPos.Y)
@@ -1473,8 +1535,13 @@ local function SetupGunControllerHooks(forceRehook)
 
             if GunHook.Bullet and hookfunction and (not GunHook.IsHooked or (GunHook._HookedBulletTarget and GunHook.Bullet ~= GunHook._HookedBulletTarget)) then
                 GunHook.IsHooked = true
-                GunHook._HookedBulletTarget = GunHook.Bullet
-                GunHook.OldBullet = hookfunction(GunHook.Bullet, function(...)
+                local targetBulletFn = GunHook.Bullet
+                GunHook._HookedBulletTarget = targetBulletFn
+                local oldBulletFn
+                oldBulletFn = hookfunction(targetBulletFn, function(...)
+                    if Env.PrisonLife2026RunToken ~= RunToken or not Env.PrisonLife2026Running then
+                        return oldBulletFn(...)
+                    end
                     GunHook.BulletHookFiredCount = (GunHook.BulletHookFiredCount or 0) + 1
                     local args = table.pack(...)
                     local rawOrigOrigin = args[1]
@@ -1488,7 +1555,7 @@ local function SetupGunControllerHooks(forceRehook)
                             rawOrigOrigin = origOrigin
                         end
                     end
-                    local activeTargetPart, activeOrigin, activeHitPos = nil, nil, nil
+                    local activeTargetPart, _unusedPlr, activeOrigin, activeHitPos = nil, nil, nil, nil
 
                     if GunHook.TaseTargetPart and GunHook.TaseTargetPart.Parent then
                         activeTargetPart = GunHook.TaseTargetPart
@@ -1497,7 +1564,7 @@ local function SetupGunControllerHooks(forceRehook)
                         activeTargetPart = GunHook.RageTargetPart
                         activeOrigin, activeHitPos = FindWallbangTrajectory(origOrigin, activeTargetPart, activeTargetPart.Parent, true)
                     elseif State.Ragebot or State.AutoHvH then
-                        activeTargetPart, _, activeOrigin, activeHitPos = GetBestCombatTarget({
+                        activeTargetPart, _unusedPlr, activeOrigin, activeHitPos = GetBestCombatTarget({
                             origin = origOrigin,
                             use360 = State.Ragebot360 or State.AutoHvH,
                             fov = State.SilentAimFOV,
@@ -1512,7 +1579,7 @@ local function SetupGunControllerHooks(forceRehook)
                         activeOrigin = GunHook.CurrentSilentOrigin
                         activeHitPos = GunHook.CurrentSilentHitPos
                         if not (activeTargetPart and activeTargetPart.Parent) then
-                            activeTargetPart, _, activeOrigin, activeHitPos = GetBestCombatTarget({
+                            activeTargetPart, _unusedPlr, activeOrigin, activeHitPos = GetBestCombatTarget({
                                 origin = origOrigin,
                                 use360 = false,
                                 fov = State.SilentAimFOV,
@@ -1548,7 +1615,7 @@ local function SetupGunControllerHooks(forceRehook)
                         if type(args[3]) == "number" then args[3] = 0 end
                     end
 
-                    local ret = table.pack(GunHook.OldBullet(table.unpack(args, 1, args.n)))
+                    local ret = table.pack(oldBulletFn(table.unpack(args, 1, args.n)))
                     local hitPart = ret[1]
                     local hitPos = (typeof(ret[2]) == "Vector3" and ret[2]) or args[2]
                     if typeof(args[1]) == "Vector3" and typeof(hitPos) == "Vector3" then
@@ -1559,6 +1626,8 @@ local function SetupGunControllerHooks(forceRehook)
                     end
                     return table.unpack(ret, 1, ret.n)
                 end)
+                GunHook.OldBullet = oldBulletFn
+                table.insert(HookedFunctions, { fn = targetBulletFn, orig = oldBulletFn })
             end
         end)
     end
@@ -1567,7 +1636,8 @@ local function SetupGunControllerHooks(forceRehook)
         pcall(function()
             local oldNamecall
             oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
-                if Env.PrisonLife2026Running
+                if Env.PrisonLife2026RunToken == RunToken
+                    and Env.PrisonLife2026Running
                     and (not GunHook.IsHooked or (GunHook.BulletHookFiredCount or 0) == 0)
                     and (State.SilentAim or State.Ragebot or State.AutoHvH or GunHook.ForceRageShot or GunHook.TaseTargetPart)
                     and self == Workspace
@@ -1580,8 +1650,11 @@ local function SetupGunControllerHooks(forceRehook)
                             if holdingGun then
                                 local targetPart = GunHook.TaseTargetPart or GunHook.RageTargetPart or GunHook.CurrentSilentTargetPart
                                 if targetPart and targetPart.Parent then
-                                    local newDir = (targetPart.Position - origin).Unit * math.max(dir.Magnitude, (targetPart.Position - origin).Magnitude + 2)
-                                    return oldNamecall(self, origin, newDir, params)
+                                    local diff = targetPart.Position - origin
+                                    if diff.Magnitude > 0.01 then
+                                        local newDir = diff.Unit * math.max(dir.Magnitude, diff.Magnitude + 2)
+                                        return oldNamecall(self, origin, newDir, params)
+                                    end
                                 end
                             end
                         end
@@ -1694,7 +1767,7 @@ local function FireToolAtTarget(tool, targetPart, isRage, isTase, isCombo)
             KeyCode = Enum.KeyCode.Unknown,
             Position = clickPos,
         }
-        pcall(task.spawn, GunHook.Shoot, inputObj)
+        task.spawn(function() pcall(GunHook.Shoot, inputObj) end)
     else
         pcall(function() tool:Activate() end)
     end
@@ -1719,19 +1792,7 @@ end
 -- ============================================================================
 -- // SECTION 4: 5-MODE BULLET SHIELD (NON-BLOCKING HALO + ANTI-HIT DESYNC)
 -- ============================================================================
-local HoloShieldState = {
-    Model = nil,
-    CorePart = nil,
-    HP = 180,
-    MaxHP = 180,
-    LastHit = 0,
-    DesyncActive = false,
-    SavedCF = nil,
-    SavedVel = nil,
-    JitterAngle = 0,
-    LastAttacker = nil,
-    LastAttackClock = 0,
-}
+-- (`HoloShieldState` initialized above Section 1 so Section 3 hooks share the local upvalue)
 
 local function HasEquippedRiotShield()
     local char = LocalPlayer.Character
@@ -2189,10 +2250,12 @@ local function FireGiverPickup(hrp, giver)
     if Remotes.GiverPressed then pcall(function() Remotes.GiverPressed:FireServer(giver) end) end
     if Remotes.TouchGiver then pcall(function() Remotes.TouchGiver:FireServer(giver) end) end
     if Remotes.InteractWithItem then
-        pcall(function()
-            local part = giver:IsA("BasePart") and giver or giver:FindFirstChildWhichIsA("BasePart", true)
-            if part then task.spawn(function() Remotes.InteractWithItem:InvokeServer(part) end) end
-        end)
+        local part = giver:IsA("BasePart") and giver or giver:FindFirstChildWhichIsA("BasePart", true)
+        if part then
+            task.spawn(function()
+                pcall(function() Remotes.InteractWithItem:InvokeServer(part) end)
+            end)
+        end
     end
     if firetouchinterest and hrp then
         local touchPart = giver:IsA("BasePart") and giver or giver:FindFirstChildWhichIsA("BasePart", true)
@@ -2237,36 +2300,38 @@ local function GrabWeapons(weaponList, silent)
     local savedCF = (HoloShieldState.DesyncActive and HoloShieldState.SavedCF) or hrp.CFrame
     HoloShieldState.DesyncActive = false
 
-    local lastPos = hrp.Position
-    for idx, item in ipairs(queue) do
-        if not hrp or not hrp.Parent or hum.Health <= 0 then break end
-        -- Pause briefly if switching map zones (Armory <-> Criminal Base) so server doesn't see 60Hz oscillation
-        if (item.CF.Position - lastPos).Magnitude > 600 then
-            task.wait(0.22)
-        end
-
-        hrp.AssemblyLinearVelocity = Vector3.zero
-        hrp.CFrame = item.CF
-        lastPos = item.CF.Position
-        task.wait(0.14)
-
-        local attempts = 0
-        while not HasWeapon(item.Name) and attempts < 5 do
+    pcall(function()
+        local lastPos = hrp.Position
+        for idx, item in ipairs(queue) do
             if not hrp or not hrp.Parent or hum.Health <= 0 then break end
-            attempts = attempts + 1
+            -- Pause briefly if switching map zones (Armory <-> Criminal Base) so server doesn't see 60Hz oscillation
+            if (item.CF.Position - lastPos).Magnitude > 600 then
+                task.wait(0.22)
+            end
+
             hrp.AssemblyLinearVelocity = Vector3.zero
             hrp.CFrame = item.CF
-            FireGiverPickup(hrp, item.Giver)
-            task.wait(0.16)
+            lastPos = item.CF.Position
+            task.wait(0.14)
+
+            local attempts = 0
+            while not HasWeapon(item.Name) and attempts < 5 do
+                if not hrp or not hrp.Parent or hum.Health <= 0 then break end
+                attempts = attempts + 1
+                hrp.AssemblyLinearVelocity = Vector3.zero
+                hrp.CFrame = item.CF
+                FireGiverPickup(hrp, item.Giver)
+                task.wait(0.16)
+            end
+
+            if idx < #queue then task.wait(0.10) end
         end
 
-        if idx < #queue then task.wait(0.10) end
-    end
-
-    if hrp and hrp.Parent and hum and hum.Health > 0 then
-        hrp.AssemblyLinearVelocity = Vector3.zero
-        hrp.CFrame = savedCF
-    end
+        if hrp and hrp.Parent and hum and hum.Health > 0 then
+            hrp.AssemblyLinearVelocity = Vector3.zero
+            hrp.CFrame = savedCF
+        end
+    end)
 
     IsGrabbingGuns = false
     App.ToolArbiter.Release("GrabWeapons")
@@ -2299,13 +2364,13 @@ function App.SetAutoLoadoutKit(kitName, grabNow)
         for _, w in ipairs(kitList) do table.insert(copy, w) end
         State.AutoGetGunsSelection = copy
         State.AutoGetGuns = true
-        if UIRefs.SyncVisualUI then pcall(UIRefs.SyncVisualUI) end
+        if Core.SyncVisualUI then pcall(Core.SyncVisualUI) end
         if grabNow ~= false then
             task.spawn(GrabWeapons, copy, false)
         end
         Notify("Loadout Kit", ("Applied kit '%s' (%d items)."):format(canonical, #copy), 2.4)
     else
-        if UIRefs.SyncVisualUI then pcall(UIRefs.SyncVisualUI) end
+        if Core.SyncVisualUI then pcall(Core.SyncVisualUI) end
         Notify("Loadout Kit", "Cleared active loadout kit (None).", 2.0)
     end
     return canonical
@@ -2337,7 +2402,7 @@ function App.RefillEmptyWeapons()
                         table.insert(lowWeapons, { Name = t.Name, Giver = giver, CF = underCF })
                     end
                 elseif curAmmo < maxAmmo and t == char:FindFirstChildOfClass("Tool") and GunHook.Reload then
-                    pcall(task.spawn, GunHook.Reload)
+                    task.spawn(function() pcall(GunHook.Reload) end)
                 end
             end
         end
@@ -2346,7 +2411,7 @@ function App.RefillEmptyWeapons()
     inspectContainer(LocalPlayer:FindFirstChildOfClass("Backpack"))
 
     if #lowWeapons == 0 then
-        if GunHook.Reload then pcall(task.spawn, GunHook.Reload) end
+        if GunHook.Reload then task.spawn(function() pcall(GunHook.Reload) end) end
         Notify("Refill", "Reloaded mags (all reserves healthy)!", 2.0)
         return
     end
@@ -2356,22 +2421,24 @@ function App.RefillEmptyWeapons()
         App.ToolArbiter.Acquire("RefillEmptyWeapons", 6, 4.0)
         local savedCF = (HoloShieldState.DesyncActive and HoloShieldState.SavedCF) or hrp.CFrame
         HoloShieldState.DesyncActive = false
-        for _, item in ipairs(lowWeapons) do
-            if not hrp or not hrp.Parent or hum.Health <= 0 then break end
-            hrp.AssemblyLinearVelocity = Vector3.zero
-            hrp.CFrame = item.CF
-            task.wait(0.12)
-            FireGiverPickup(hrp, item.Giver)
-            task.wait(0.14)
-        end
-        if hrp and hrp.Parent and hum and hum.Health > 0 then
-            hrp.AssemblyLinearVelocity = Vector3.zero
-            hrp.CFrame = savedCF
-        end
+        pcall(function()
+            for _, item in ipairs(lowWeapons) do
+                if not hrp or not hrp.Parent or hum.Health <= 0 then break end
+                hrp.AssemblyLinearVelocity = Vector3.zero
+                hrp.CFrame = item.CF
+                task.wait(0.12)
+                FireGiverPickup(hrp, item.Giver)
+                task.wait(0.14)
+            end
+            if hrp and hrp.Parent and hum and hum.Health > 0 then
+                hrp.AssemblyLinearVelocity = Vector3.zero
+                hrp.CFrame = savedCF
+            end
+        end)
         IsGrabbingGuns = false
         App.ToolArbiter.Release("RefillEmptyWeapons")
         ApplyGunModsAll()
-        if GunHook.Reload then pcall(task.spawn, GunHook.Reload) end
+        if GunHook.Reload then task.spawn(function() pcall(GunHook.Reload) end) end
         Notify("Refill", ("Refilled %d low-ammo weapon(s)!"):format(#lowWeapons), 2.2)
     end)
 end
@@ -2911,10 +2978,7 @@ local function UpdateVehicleWheelAura(seat)
     end
 end
 
--- Shared cross-section tables (keeps file-level locals well under Lua's 200-local limit)
-local Core = {}
-local Admin = {}
-local UIRefs = {}
+-- (Shared cross-section tables `Core`, `Admin`, `UIRefs` hoisted above Section 1)
 
 -- ============================================================================
 -- // SECTION 7: TEAM SWITCHER, FAST RESPAWN, ANTI-TASE & ANTI-ARREST
@@ -3104,22 +3168,26 @@ do
         end
     end
 
+    local HookedClosureSet = setmetatable({}, { __mode = "k" })
     function Core.InstallAntiTaseAndAntiArrestHooks()
         if getconnections and hookfunction then
             if Remotes.PlayerTased then
                 pcall(function()
                     for _, conn in ipairs(getconnections(Remotes.PlayerTased.OnClientEvent)) do
-                        if conn.Function and not conn._pl2026Hooked then
+                        local fn = conn.Function
+                        if type(fn) == "function" and not HookedClosureSet[fn] then
+                            HookedClosureSet[fn] = true
                             local orig
-                            orig = hookfunction(conn.Function, function(...)
-                                if Env.PrisonLife2026Running and (State.AntiTase or State.AutoHvH) then
+                            local stub = function(...)
+                                if Env.PrisonLife2026RunToken == RunToken and Env.PrisonLife2026Running and (State.AntiTase or State.AutoHvH) then
                                     Core.PurgeTaseAndRagdoll()
                                     return nil
                                 end
                                 return orig(...)
-                            end)
-                            conn._pl2026Hooked = true
-                            table.insert(HookedFunctions, { fn = conn.Function, orig = orig })
+                            end
+                            HookedClosureSet[stub] = true
+                            orig = hookfunction(fn, stub)
+                            table.insert(HookedFunctions, { fn = fn, orig = orig })
                         end
                     end
                 end)
@@ -3127,16 +3195,19 @@ do
             if Remotes.ClientArrested then
                 pcall(function()
                     for _, conn in ipairs(getconnections(Remotes.ClientArrested.OnClientEvent)) do
-                        if conn.Function and not conn._pl2026Hooked then
+                        local fn = conn.Function
+                        if type(fn) == "function" and not HookedClosureSet[fn] then
+                            HookedClosureSet[fn] = true
                             local orig
-                            orig = hookfunction(conn.Function, function(...)
-                                if Env.PrisonLife2026Running and (State.AntiArrest or State.AutoHvH) then
+                            local stub = function(...)
+                                if Env.PrisonLife2026RunToken == RunToken and Env.PrisonLife2026Running and (State.AntiArrest or State.AutoHvH) then
                                     return nil
                                 end
                                 return orig(...)
-                            end)
-                            conn._pl2026Hooked = true
-                            table.insert(HookedFunctions, { fn = conn.Function, orig = orig })
+                            end
+                            HookedClosureSet[stub] = true
+                            orig = hookfunction(fn, stub)
+                            table.insert(HookedFunctions, { fn = fn, orig = orig })
                         end
                     end
                 end)
@@ -3291,15 +3362,17 @@ do
 
     function Core.SetSpectatePlayer(targetPlr)
         Core.SpectateTarget = targetPlr
+        local activeCam = Camera or Workspace.CurrentCamera
+        if activeCam then Camera = activeCam end
         if not targetPlr or targetPlr == LocalPlayer then
             Core.SpectateTarget = nil
             local myHum = GetHumanoid(LocalPlayer.Character)
-            if myHum then Camera.CameraSubject = myHum end
+            if myHum and activeCam then activeCam.CameraSubject = myHum end
             return
         end
         local tHum = GetHumanoid(targetPlr.Character)
-        if tHum then
-            Camera.CameraSubject = tHum
+        if tHum and activeCam then
+            activeCam.CameraSubject = tHum
             Notify("Spectate", "Viewing " .. targetPlr.Name, 2)
         end
     end
@@ -3312,7 +3385,7 @@ do
     -- 1. Top-Left Compact Draggable `.combo1` Burst Pill
     local ComboTopLeftBtn = Instance.new("TextButton")
     ComboTopLeftBtn.Name = "KX_Combo1Btn"
-    ComboTopLeftBtn.Position = UDim2.new(0, 14, 0, 56)
+    ComboTopLeftBtn.Position = UDim2.new(0, 14, 0, IsMobile and 68 or 56)
     ComboTopLeftBtn.Size = UDim2.fromOffset(78, 26)
     ComboTopLeftBtn.BackgroundColor3 = Color3.fromRGB(16, 20, 30)
     ComboTopLeftBtn.BackgroundTransparency = 0.18
@@ -3339,7 +3412,7 @@ do
     local CmdTogglePill = Instance.new("TextButton")
     CmdTogglePill.Name = "KX_CmdPill"
     CmdTogglePill.AnchorPoint = Vector2.new(1, 0)
-    CmdTogglePill.Position = UDim2.new(1, -14, 0, 56)
+    CmdTogglePill.Position = UDim2.new(1, -14, 0, IsMobile and 68 or 56)
     CmdTogglePill.Size = UDim2.fromOffset(68, 26)
     CmdTogglePill.BackgroundColor3 = Color3.fromRGB(16, 20, 30)
     CmdTogglePill.BackgroundTransparency = 0.18
@@ -3856,7 +3929,7 @@ do
                 local hrp = (info and info.hrp and info.hrp.Parent == char and info.hrp) or GetRoot(char)
                 local hum = (info and info.hum and info.hum.Parent == char and info.hum) or GetHumanoid(char)
                 if hrp and hum and hum.Health > 0 then
-                    local seated = (hum.SeatPart and hum.SeatPart:IsA("VehicleSeat")) ~= nil
+                    local seated = (hum.SeatPart ~= nil and hum.SeatPart:IsA("VehicleSeat"))
                     local prev = PrevPos[plr]
                     local wasSeated = PrevSeated[plr]
                     local curPos = hrp.Position
@@ -4515,15 +4588,18 @@ do
 
             -- Smooth 3D Character Fly & Vehicle Fly (Zero gravity downward jitter!)
             local seat = hum.SeatPart
-            local isDriving = (seat and seat:IsA("VehicleSeat")) ~= nil
+            local isDriving = (seat ~= nil and seat:IsA("VehicleSeat"))
             if UIRefs.FlyUpBtn then UIRefs.FlyUpBtn.Visible = State.VehicleFly or State.Fly end
             if UIRefs.FlyDownBtn then UIRefs.FlyDownBtn.Visible = State.VehicleFly or State.Fly end
 
             UpdateVehicleWheelAura(isDriving and seat or nil)
 
+            local activeCam = Camera or Workspace.CurrentCamera
+            if activeCam then Camera = activeCam end
+
             if State.Fly and not isDriving then
                 local flySpd = State.AntiBanSafeMode and math.min(State.FlySpeed, 85) or State.FlySpeed
-                local camCF = Camera.CFrame
+                local camCF = (activeCam and activeCam.CFrame) or hrp.CFrame
                 local moveDir = hum.MoveDirection
                 local horizMove = Vector3.new(moveDir.X, 0, moveDir.Z)
                 local vel = Vector3.zero
@@ -4556,7 +4632,7 @@ do
                         FlyBG.Parent = hrp
                     end
                     FlyBV.Velocity = vel
-                    FlyBG.CFrame = Camera.CFrame
+                    FlyBG.CFrame = camCF
                     hum.PlatformStand = true
                 end
             else
@@ -4565,7 +4641,7 @@ do
 
             if isDriving then
                 if State.VehicleFly then
-                    local camCF = Camera.CFrame
+                    local camCF = (activeCam and activeCam.CFrame) or seat.CFrame
                     local moveDir = hum.MoveDirection
                     local vel = Vector3.zero
                     local flySpeed = State.AntiBanSafeMode and math.min(State.VehicleFlySpeed, 110) or State.VehicleFlySpeed
@@ -4678,7 +4754,10 @@ do
                         end
                     end
                     if State.KillAuraFaceTarget then
-                        hrp.CFrame = CFrame.lookAt(hrp.Position, Vector3.new(closestHrp.Position.X, hrp.Position.Y, closestHrp.Position.Z))
+                        local flat = Vector3.new(closestHrp.Position.X, hrp.Position.Y, closestHrp.Position.Z)
+                        if (flat - hrp.Position).Magnitude > 0.01 then
+                            hrp.CFrame = CFrame.lookAt(hrp.Position, flat)
+                        end
                     end
                 end
             end
@@ -5081,8 +5160,11 @@ do
                     atkPos = threatPart and threatPart.Position
                 end
                 if atkPos then
-                    outgoingCF = CFrame.lookAt(origCF.Position, Vector3.new(atkPos.X, origCF.Position.Y, atkPos.Z))
-                    didRotate = true
+                    local flatAtk = Vector3.new(atkPos.X, origCF.Position.Y, atkPos.Z)
+                    if (flatAtk - origCF.Position).Magnitude > 0.01 then
+                        outgoingCF = CFrame.lookAt(origCF.Position, flatAtk)
+                        didRotate = true
+                    end
                 end
             end
 
@@ -5447,16 +5529,16 @@ do
             return tostring(val)
         elseif t == "string" then return escapeStr(val)
         elseif t == "table" then
-            local maxIdx, count = 0, 0
+            local maxIdx, count, isArray = 0, 0, true
             for k in pairs(val) do
                 count = count + 1
                 if type(k) == "number" and k >= 1 and math.floor(k) == k then
                     if k > maxIdx then maxIdx = k end
                 else
-                    maxIdx = -1
+                    isArray = false
                 end
             end
-            if maxIdx == count and count > 0 then
+            if isArray and maxIdx == count and count > 0 then
                 local parts = {}
                 for i = 1, count do parts[i] = PureEncode(val[i]) end
                 return "[" .. table.concat(parts, ",") .. "]"
@@ -6305,80 +6387,111 @@ end
 Env.PrisonLife2026Running = true
 
 do
-    if WindUI then
-        local Window = WindUI:CreateWindow({
-            Title = "Prison Life • 2026 Hub (v7.0 Apex KX Pro)",
-            Icon = "shield",
-            Author = "Apex Engine • AntiCarBring • Scoped Caches • Kits",
-            Folder = "PrisonLife2026HubV7",
-            Size = IsMobile and UDim2.fromOffset(520, 360) or UDim2.fromOffset(600, 450),
-            Transparent = true,
-            Theme = "Dark",
-            SideBarWidth = 170,
-        })
+    local canUseWindUI = (type(WindUI) == "table" and type(WindUI.CreateWindow) == "function")
+    local windBuilt = false
 
+    if canUseWindUI then
         UIRefs.Controls = UIRefs.Controls or {}
-        UIRefs.IsSyncing = false
-        local function BindCtrl(key, ctrl)
-            if ctrl then UIRefs.Controls[key] = ctrl end
-            return ctrl
-        end
-        function Core.SyncVisualUI()
-            if UIRefs.IsSyncing then return end
-            UIRefs.IsSyncing = true
-            for key, ctrl in pairs(UIRefs.Controls) do
-                if State[key] ~= nil and ctrl and ctrl.Set then
-                    pcall(function() ctrl:Set(State[key]) end)
-                end
+        UIRefs.SyncHooks = {}
+        UIRefs.IsSyncing = true
+
+        local okW, errW = pcall(function()
+            local Window = WindUI:CreateWindow({
+                Title = "Prison Life • 2026 Hub (v7.1 Apex KX Pro)",
+                Icon = "shield",
+                Author = "Apex Engine • Mobile/PC • Scoped Caches",
+                Folder = "PrisonLife2026HubV7",
+                MinSize = IsMobile and Vector2.new(360, 230) or Vector2.new(500, 340),
+                Size = IsMobile and UDim2.fromOffset(440, 285) or UDim2.fromOffset(600, 450),
+                Transparent = true,
+                Theme = "Dark",
+                SideBarWidth = IsMobile and 120 or 170,
+                ToggleKey = Enum.KeyCode.RightShift,
+            })
+            UIRefs.WindUIWindow = Window
+            UIRefs.WindUI = WindUI
+
+            pcall(function()
+                if WindUI.ScreenGui then WindUI.ScreenGui.DisplayOrder = 100 end
+                if WindUI.DropdownGui then WindUI.DropdownGui.DisplayOrder = 101 end
+                if WindUI.NotificationGui then WindUI.NotificationGui.DisplayOrder = 102 end
+                if WindUI.TooltipGui then WindUI.TooltipGui.DisplayOrder = 103 end
+            end)
+
+            local function BindCtrl(key, ctrl)
+                if ctrl then UIRefs.Controls[key] = ctrl end
+                return ctrl
             end
-            UIRefs.IsSyncing = false
-        end
-
-        Window:EditOpenButton({
-            Title = "🚔 PL 2026 Pro",
-            Icon = "shield",
-            CornerRadius = UDim.new(0, 14),
-            StrokeThickness = 2,
-            Color = ColorSequence.new(
-                Color3.fromHex("1e3a8a"),
-                Color3.fromHex("3b82f6")
-            ),
-            Draggable = true,
-        })
-
-        local TabShield   = Window:Tab({ Title = "Shield & Safe", Icon = "shield" })
-        local TabCombat   = Window:Tab({ Title = "HvH & Aim", Icon = "crosshair" })
-        local TabWeapons  = Window:Tab({ Title = "Guns & .combo1", Icon = "zap" })
-        local TabPrison   = Window:Tab({ Title = "Prison & Guard", Icon = "lock" })
-        local TabVehicles = Window:Tab({ Title = "Cars & KX", Icon = "car" })
-        local TabMove     = Window:Tab({ Title = "Movement", Icon = "wind" })
-        local TabVisuals  = Window:Tab({ Title = "ESP & Admin", Icon = "eye" })
-
-        -- // TAB 1: SHIELD & SAFE
-        TabShield:Section({ Title = "🛡️ Anti-Ban Safe Mode & Quick Presets" })
-        BindCtrl("AntiBanSafeMode", TabShield:Toggle({
-            Title = "Anti-Ban Safe Mode (Error Code 600 Guard • ON)",
-            Desc = "Enforces 2026 server-safe FireRate, KillAura, Teleport & WalkSpeed caps",
-            Value = true,
-            Callback = function(v)
+            function Core.SyncVisualUI()
                 if UIRefs.IsSyncing then return end
-                State.AntiBanSafeMode = v
-                ApplyGunModsAll()
-                Notify("Anti-Ban", v and "Safe Mode ON" or "Safe Mode OFF", 2.5)
-            end,
-        }))
-        TabShield:Dropdown({
-            Title = "Configuration Preset",
-            Values = { "Safe (Anti-Ban Default)", "Legit (Closet)", "Rage (AntiLock + 360)", "HvH (AutoHvH + UndergroundPeek)" },
-            Value = "Safe (Anti-Ban Default)",
-            Callback = function(v)
-                local p = NormalizeDropdownValue(v)
-                if p:find("Legit") then Core.ApplyPresetProfile("legit")
-                elseif p:find("HvH") then Core.ApplyPresetProfile("hvh")
-                elseif p:find("Rage") then Core.ApplyPresetProfile("rage")
-                else Core.ApplyPresetProfile("safe") end
-            end,
-        })
+                UIRefs.IsSyncing = true
+                pcall(function()
+                    for key, ctrl in pairs(UIRefs.Controls) do
+                        local val = State[key]
+                        if val ~= nil and ctrl then
+                            if type(ctrl.Select) == "function" and type(ctrl.Set) ~= "function" then
+                                pcall(function() ctrl:Select(val) end)
+                            elseif type(ctrl.Set) == "function" then
+                                pcall(function() ctrl:Set(val, false) end)
+                            end
+                        end
+                    end
+                    for _, fn in ipairs(UIRefs.SyncHooks) do
+                        pcall(fn)
+                    end
+                end)
+                UIRefs.IsSyncing = false
+            end
+
+            Window:EditOpenButton({
+                Title = "🚔 PL 2026 Pro",
+                Icon = "shield",
+                CornerRadius = UDim.new(0, 14),
+                StrokeThickness = 2,
+                Color = ColorSequence.new(
+                    Color3.fromHex("1e3a8a"),
+                    Color3.fromHex("3b82f6")
+                ),
+                Draggable = true,
+                Enabled = true,
+                OnlyMobile = false,
+                Position = UDim2.new(0.5, 0, 0, IsMobile and 54 or 18),
+            })
+
+            local TabShield   = Window:Tab({ Title = "Shield & Safe", Icon = "shield" })
+            local TabCombat   = Window:Tab({ Title = "HvH & Aim", Icon = "crosshair" })
+            local TabWeapons  = Window:Tab({ Title = "Guns & .combo1", Icon = "zap" })
+            local TabPrison   = Window:Tab({ Title = "Prison & Guard", Icon = "lock" })
+            local TabVehicles = Window:Tab({ Title = "Cars & KX", Icon = "car" })
+            local TabMove     = Window:Tab({ Title = "Movement", Icon = "wind" })
+            local TabVisuals  = Window:Tab({ Title = "ESP & Admin", Icon = "eye" })
+
+            -- // TAB 1: SHIELD & SAFE
+            TabShield:Section({ Title = "🛡️ Anti-Ban Safe Mode & Quick Presets" })
+            BindCtrl("AntiBanSafeMode", TabShield:Toggle({
+                Title = "Anti-Ban Safe Mode (Error Code 600 Guard • ON)",
+                Desc = "Enforces 2026 server-safe FireRate, KillAura, Teleport & WalkSpeed caps",
+                Value = true,
+                Callback = function(v)
+                    if UIRefs.IsSyncing then return end
+                    State.AntiBanSafeMode = v
+                    ApplyGunModsAll()
+                    Notify("Anti-Ban", v and "Safe Mode ON" or "Safe Mode OFF", 2.5)
+                end,
+            }))
+            TabShield:Dropdown({
+                Title = "Configuration Preset",
+                Values = { "Safe (Anti-Ban Default)", "Legit (Closet)", "Rage (AntiLock + 360)", "HvH (AutoHvH + UndergroundPeek)" },
+                Value = "Safe (Anti-Ban Default)",
+                Callback = function(v)
+                    if UIRefs.IsSyncing then return end
+                    local p = NormalizeDropdownValue(v)
+                    if p:find("Legit") then Core.ApplyPresetProfile("legit")
+                    elseif p:find("HvH") then Core.ApplyPresetProfile("hvh")
+                    elseif p:find("Rage") then Core.ApplyPresetProfile("rage")
+                    else Core.ApplyPresetProfile("safe") end
+                end,
+            })
 
         TabShield:Section({ Title = "2026 Anti-Hit Shield (Hotkey: G • Zero Ray-Block)" })
         BindCtrl("HoloShield", TabShield:Toggle({
@@ -6549,6 +6662,7 @@ do
             Values = { "Head", "Torso", "Random" },
             Value = "Head",
             Callback = function(v)
+                if UIRefs.IsSyncing then return end
                 local part = NormalizeDropdownValue(v)
                 if part ~= "" then
                     State.SilentAimAimPart = part
@@ -6604,14 +6718,20 @@ do
                 if v then SetupGunControllerHooks() end
             end,
         }))
-        TabCombat:Toggle({
-            Title = "Shoot Through Riot Shields & Vehicles",
-            Value = false,
-            Callback = function(v)
-                State.AntiRiotShield = v
-                State.VehicleWallbang = v
-            end,
-        })
+        do
+            local wallCtrl = TabCombat:Toggle({
+                Title = "Shoot Through Riot Shields & Vehicles",
+                Value = false,
+                Callback = function(v)
+                    if UIRefs.IsSyncing then return end
+                    State.AntiRiotShield = v
+                    State.VehicleWallbang = v
+                end,
+            })
+            if wallCtrl and wallCtrl.Set then
+                table.insert(UIRefs.SyncHooks, function() wallCtrl:Set(State.AntiRiotShield, false) end)
+            end
+        end
         BindCtrl("KillAura", TabCombat:Toggle({
             Title = "Melee Kill Aura (Anti-Ban Rate-Limited)",
             Value = false,
@@ -6742,28 +6862,55 @@ do
         BindCtrl("GunFireRateSPS", TabWeapons:Slider({
             Title = "FireRate (SPS • Capped at 15 in Safe Mode)",
             Value = { Min = 5, Max = 25, Default = 14 },
-            Callback = function(v) State.GunFireRateSPS = tonumber(v) or 14; ApplyGunModsAll() end,
+            Callback = function(v)
+                if UIRefs.IsSyncing then return end
+                State.GunFireRateSPS = tonumber(v) or 14
+                ApplyGunModsAll()
+            end,
         }))
-        TabWeapons:Toggle({
-            Title = "Zero Bullet Spread & Force Full Auto",
-            Value = true,
-            Callback = function(v) State.GunNoSpread = v; State.GunFullAuto = v; ApplyGunModsAll() end,
-        })
+        do
+            local spreadCtrl = TabWeapons:Toggle({
+                Title = "Zero Bullet Spread & Force Full Auto",
+                Value = true,
+                Callback = function(v)
+                    if UIRefs.IsSyncing then return end
+                    State.GunNoSpread = v
+                    State.GunFullAuto = v
+                    ApplyGunModsAll()
+                end,
+            })
+            if spreadCtrl and spreadCtrl.Set then
+                table.insert(UIRefs.SyncHooks, function() spreadCtrl:Set(State.GunNoSpread, false) end)
+            end
+        end
         BindCtrl("GunZeroChargeTime", TabWeapons:Toggle({
             Title = "Zero Sniper / Taser ChargeTime Delay",
             Value = true,
-            Callback = function(v) State.GunZeroChargeTime = v; ApplyGunModsAll() end,
+            Callback = function(v)
+                if UIRefs.IsSyncing then return end
+                State.GunZeroChargeTime = v
+                ApplyGunModsAll()
+            end,
         }))
         BindCtrl("AutoReload", TabWeapons:Toggle({
             Title = "Auto Reload at 0 Ammo",
             Value = true,
             Callback = function(v) State.AutoReload = v end,
         }))
-        TabWeapons:Toggle({
-            Title = "Auto Heal (<80 HP) & Auto Armor Vest",
-            Value = false,
-            Callback = function(v) State.AutoHeal = v; State.AutoArmor = v end,
-        })
+        do
+            local healArmorCtrl = TabWeapons:Toggle({
+                Title = "Auto Heal (<80 HP) & Auto Armor Vest",
+                Value = false,
+                Callback = function(v)
+                    if UIRefs.IsSyncing then return end
+                    State.AutoHeal = v
+                    State.AutoArmor = v
+                end,
+            })
+            if healArmorCtrl and healArmorCtrl.Set then
+                table.insert(UIRefs.SyncHooks, function() healArmorCtrl:Set(State.AutoHeal or State.AutoArmor, false) end)
+            end
+        end
 
         -- // TAB 4: PRISON & GUARD
         TabPrison:Section({ Title = "Instant Team Switcher" })
@@ -6926,14 +7073,14 @@ do
             Value = { Min = 25, Max = 140, Default = 65 },
             Callback = function(v) State.FlySpeed = tonumber(v) or 65 end,
         }))
-        UIRefs.FEInvisToggle = TabVehicles:Toggle({
+        UIRefs.FEInvisToggle = BindCtrl("FEInvisible", TabVehicles:Toggle({
             Title = "Serverside FE Invisible (No Cyan Box • .invis)",
             Value = false,
             Callback = function(v)
                 if UIRefs.IsSyncing then return end
                 Core.SetFEInvisibleState(v, false)
             end,
-        })
+        }))
         BindCtrl("AntiInvisible", TabVehicles:Toggle({
             Title = "Anti-Invisible (Reveal Invisible Exploiters)",
             Value = false,
@@ -6972,6 +7119,7 @@ do
             Values = { "RegionSafe", "Custom", "AlwaysSprint" },
             Value = "RegionSafe",
             Callback = function(v)
+                if UIRefs.IsSyncing then return end
                 local mode = NormalizeDropdownValue(v)
                 if mode ~= "" then State.MaxSpeedMode = mode end
             end,
@@ -6985,6 +7133,7 @@ do
             Title = "JumpPower Boost",
             Value = false,
             Callback = function(v)
+                if UIRefs.IsSyncing then return end
                 State.JumpPowerEnabled = v
                 if not v then
                     local hum = GetHumanoid(LocalPlayer.Character)
@@ -6997,16 +7146,22 @@ do
             Value = { Min = 50, Max = 110, Default = 65 },
             Callback = function(v) State.JumpPower = tonumber(v) or 65 end,
         }))
-        TabMove:Toggle({
-            Title = "No Jump Cooldown & Infinite Jump",
-            Value = false,
-            Callback = function(v)
-                State.AntiJumpCooldown = v
-                State.InfiniteStamina = v
-                State.InfiniteJump = v
-                if LocalPlayer.Character then Core.BypassAntiJump(LocalPlayer.Character, v) end
-            end,
-        })
+        do
+            local infJumpCtrl = TabMove:Toggle({
+                Title = "No Jump Cooldown & Infinite Jump",
+                Value = false,
+                Callback = function(v)
+                    if UIRefs.IsSyncing then return end
+                    State.AntiJumpCooldown = v
+                    State.InfiniteStamina = v
+                    State.InfiniteJump = v
+                    if LocalPlayer.Character then Core.BypassAntiJump(LocalPlayer.Character, v) end
+                end,
+            })
+            if infJumpCtrl and infJumpCtrl.Set then
+                table.insert(UIRefs.SyncHooks, function() infJumpCtrl:Set(State.InfiniteJump, false) end)
+            end
+        end
         BindCtrl("Noclip", TabMove:Toggle({
             Title = "Noclip (Non-Destructive + Clean Restore)",
             Value = false,
@@ -7057,15 +7212,21 @@ do
             Value = true,
             Callback = function(v) State.BulletTracers = v end,
         }))
-        TabVisuals:Toggle({
-            Title = "Hitmarker, Hit Sounds & Damage Numbers",
-            Value = true,
-            Callback = function(v)
-                State.Hitmarker = v
-                State.HitSound = v
-                State.DamageNumbers = v
-            end,
-        })
+        do
+            local hitCtrl = TabVisuals:Toggle({
+                Title = "Hitmarker, Hit Sounds & Damage Numbers",
+                Value = true,
+                Callback = function(v)
+                    if UIRefs.IsSyncing then return end
+                    State.Hitmarker = v
+                    State.HitSound = v
+                    State.DamageNumbers = v
+                end,
+            })
+            if hitCtrl and hitCtrl.Set then
+                table.insert(UIRefs.SyncHooks, function() hitCtrl:Set(State.Hitmarker, false) end)
+            end
+        end
         BindCtrl("C4ESP", TabVisuals:Toggle({
             Title = "C4 Explosive ESP",
             Value = false,
@@ -7080,15 +7241,21 @@ do
                 if not v and Core.RemoveAllItemESP then Core.RemoveAllItemESP() end
             end,
         }))
-        TabVisuals:Toggle({
-            Title = "Show Top-Left Mini-Killfeed & Cheater Alerts",
-            Value = true,
-            Callback = function(v)
-                State.ShowMiniKillfeed = v
-                State.CheaterAlerts = v
-                State.CarTPAlerts = v
-            end,
-        })
+        do
+            local kfCtrl = TabVisuals:Toggle({
+                Title = "Show Top-Left Mini-Killfeed & Cheater Alerts",
+                Value = true,
+                Callback = function(v)
+                    if UIRefs.IsSyncing then return end
+                    State.ShowMiniKillfeed = v
+                    State.CheaterAlerts = v
+                    State.CarTPAlerts = v
+                end,
+            })
+            if kfCtrl and kfCtrl.Set then
+                table.insert(UIRefs.SyncHooks, function() kfCtrl:Set(State.ShowMiniKillfeed, false) end)
+            end
+        end
         BindCtrl("ShowCommandPill", TabVisuals:Toggle({
             Title = "Show Top-Right ⌘ CMD Command Pill",
             Value = true,
@@ -7244,24 +7411,56 @@ do
                 RefreshProfileList()
             end,
         })
-        TabVisuals:Toggle({
-            Title = "Auto-Load 'default' Profile on Startup",
-            Value = State.ConfigAutoLoad,
-            Callback = function(v)
-                State.ConfigAutoLoad = v
-                App.Persistence.SaveMeta(v, "default")
-            end,
-        })
-    else
-        -- Native PC/Mobile Fallback UI
+            BindCtrl("ConfigAutoLoad", TabVisuals:Toggle({
+                Title = "Auto-Load 'default' Profile on Startup",
+                Value = State.ConfigAutoLoad,
+                Callback = function(v)
+                    if UIRefs.IsSyncing then return end
+                    State.ConfigAutoLoad = v
+                    App.Persistence.SaveMeta(v, "default")
+                end,
+            }))
+
+            pcall(function()
+                if Window.SelectTab then Window:SelectTab(1)
+                elseif TabShield.Select then TabShield:Select() end
+            end)
+        end)
+
+        UIRefs.IsSyncing = false
+        windBuilt = okW
+        if not okW then
+            if UIRefs.WindUIWindow and UIRefs.WindUIWindow.Destroy then
+                pcall(function() UIRefs.WindUIWindow:Destroy() end)
+            end
+            if WindUI then
+                for _, k in ipairs({ "ScreenGui", "NotificationGui", "DropdownGui", "TooltipGui" }) do
+                    local g = WindUI[k]
+                    if g then pcall(function() g:Destroy() end) end
+                end
+            end
+            UIRefs.WindUIWindow = nil
+            UIRefs.WindUI = nil
+            table.clear(UIRefs.Controls)
+            if UIRefs.SyncHooks then table.clear(UIRefs.SyncHooks) end
+        end
+    end
+
+    if not windBuilt then
+        -- Responsive Native PC/Mobile Fallback UI (guaranteed menu when WindUI fails/unavailable)
         local FallbackFrame = Instance.new("Frame")
         FallbackFrame.Name = "PL2026_NativeFallbackHub"
         FallbackFrame.AnchorPoint = Vector2.new(0.5, 0.5)
         FallbackFrame.Position = UDim2.fromScale(0.5, 0.5)
-        FallbackFrame.Size = UDim2.fromOffset(390, 370)
+        FallbackFrame.Size = UDim2.fromScale(0.76, 0.78)
+        FallbackFrame.Active = true
         FallbackFrame.BackgroundColor3 = Color3.fromRGB(16, 20, 30)
         FallbackFrame.BorderSizePixel = 0
         FallbackFrame.Parent = OverlayGui
+        local fbConstraint = Instance.new("UISizeConstraint")
+        fbConstraint.MinSize = Vector2.new(280, 220)
+        fbConstraint.MaxSize = Vector2.new(400, 360)
+        fbConstraint.Parent = FallbackFrame
         Instance.new("UICorner", FallbackFrame).CornerRadius = UDim.new(0, 12)
         local fbStroke = Instance.new("UIStroke", FallbackFrame)
         fbStroke.Color = Color3.fromRGB(59, 130, 246)
@@ -7269,19 +7468,34 @@ do
         MakeDraggable(FallbackFrame)
 
         local TitleBar = Instance.new("TextLabel")
-        TitleBar.Size = UDim2.new(1, -16, 0, 34)
+        TitleBar.Size = UDim2.new(1, -48, 0, 34)
         TitleBar.Position = UDim2.fromOffset(12, 4)
         TitleBar.BackgroundTransparency = 1
         TitleBar.Font = Enum.Font.GothamBold
         TitleBar.TextSize = 14
         TitleBar.TextColor3 = Color3.new(1, 1, 1)
         TitleBar.TextXAlignment = Enum.TextXAlignment.Left
-        TitleBar.Text = "🚔 Prison Life 2026 Pro (v7.0 Apex)"
+        TitleBar.Text = "🚔 Prison Life 2026 Pro (v7.1 Apex)"
         TitleBar.Parent = FallbackFrame
+
+        local CloseBtn = Instance.new("TextButton")
+        CloseBtn.Size = UDim2.fromOffset(26, 26)
+        CloseBtn.Position = UDim2.new(1, -32, 0, 6)
+        CloseBtn.BackgroundColor3 = Color3.fromRGB(30, 41, 59)
+        CloseBtn.Font = Enum.Font.GothamBold
+        CloseBtn.TextSize = 12
+        CloseBtn.TextColor3 = Color3.fromRGB(248, 113, 113)
+        CloseBtn.Text = "✕"
+        CloseBtn.Parent = FallbackFrame
+        Instance.new("UICorner", CloseBtn).CornerRadius = UDim.new(0, 8)
+        AddConnection(CloseBtn.Activated:Connect(function()
+            FallbackFrame.Visible = false
+        end))
 
         local Scroll = Instance.new("ScrollingFrame")
         Scroll.Size = UDim2.new(1, -20, 1, -48)
         Scroll.Position = UDim2.fromOffset(10, 40)
+        Scroll.Active = true
         Scroll.BackgroundTransparency = 1
         Scroll.ScrollBarThickness = 4
         Scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
@@ -7290,45 +7504,54 @@ do
         local list = Instance.new("UIListLayout", Scroll)
         list.Padding = UDim.new(0, 6)
 
-        local function AddFallbackToggle(label, initial, onToggle)
+        local fallbackRefreshers = {}
+        function Core.SyncVisualUI()
+            for _, refreshFn in ipairs(fallbackRefreshers) do
+                pcall(refreshFn)
+            end
+        end
+
+        local function AddFallbackToggle(label, initial, onToggle, stateGetter)
             local btn = Instance.new("TextButton")
             btn.Size = UDim2.new(1, -8, 0, 32)
             btn.Font = Enum.Font.GothamBold
             btn.TextSize = 12
             btn.TextColor3 = Color3.new(1, 1, 1)
-            local state = initial
+            local curState = initial
             local function refresh()
-                btn.BackgroundColor3 = state and Color3.fromRGB(37, 99, 235) or Color3.fromRGB(30, 41, 59)
-                btn.Text = (state and "✅ " or "⬜ ") .. label
+                if stateGetter then curState = stateGetter() end
+                btn.BackgroundColor3 = curState and Color3.fromRGB(37, 99, 235) or Color3.fromRGB(30, 41, 59)
+                btn.Text = (curState and "✅ " or "⬜ ") .. label
             end
             refresh()
+            table.insert(fallbackRefreshers, refresh)
             btn.Parent = Scroll
             Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 8)
-            btn.Activated:Connect(function()
-                state = not state
+            AddConnection(btn.Activated:Connect(function()
+                curState = not curState
+                onToggle(curState)
                 refresh()
-                onToggle(state)
-            end)
+            end))
         end
 
-        AddFallbackToggle("Anti-Ban Safe Mode (Error 600 Guard)", true, function(v) State.AntiBanSafeMode = v; ApplyGunModsAll() end)
-        AddFallbackToggle("AutoHvH Mode (Priority + Shield + Anti-Stun)", false, function(v) State.AutoHvH = v; if v then State.HoloShield = true; CreateHoloShield() end end)
-        AddFallbackToggle("5-Mode 3D Bullet Shield", false, function(v) State.HoloShield = v; if v then CreateHoloShield() else DestroyHoloShield() end end)
-        AddFallbackToggle("360° Ragebot (Hostile Only)", false, function(v) State.Ragebot = v; if v then SetupGunControllerHooks() end end)
-        AddFallbackToggle("Silent Aim (Bullet Hook + Wallbang)", false, function(v) State.SilentAim = v; if v then SetupGunControllerHooks() end end)
-        AddFallbackToggle("Safe Melee Kill Aura", false, function(v) State.KillAura = v end)
-        AddFallbackToggle("Gun Mods (Rapid Fire + No Spread)", false, function(v) State.GunMods = v; ApplyGunModsAll() end)
-        AddFallbackToggle("Region-Safe MaxSpeed", false, function(v) State.MaxSpeed = v end)
-        AddFallbackToggle("Character Fly", false, function(v) State.Fly = v; if not v then Core.CleanupCharFly() end end)
-        AddFallbackToggle("Anti-Tase & Anti-Arrest", true, function(v) State.AntiTase = v; State.AntiArrest = v end)
-        AddFallbackToggle("Anti-CarBring (Block Seat Kidnap)", true, function(v) State.AntiCarBring = v end)
-        AddFallbackToggle("Auto-Arrest & Auto-Taze Aura", false, function(v) State.AutoArrest = v; State.AutoTaze = v end)
-        AddFallbackToggle("Role-Colored Player ESP", false, function(v) State.ESP = v end)
+        AddFallbackToggle("Anti-Ban Safe Mode (Error 600 Guard)", State.AntiBanSafeMode, function(v) State.AntiBanSafeMode = v; ApplyGunModsAll() end, function() return State.AntiBanSafeMode end)
+        AddFallbackToggle("AutoHvH Mode (Priority + Shield + Anti-Stun)", State.AutoHvH, function(v) State.AutoHvH = v; if v then State.HoloShield = true; CreateHoloShield() end end, function() return State.AutoHvH end)
+        AddFallbackToggle("5-Mode 3D Bullet Shield", State.HoloShield, function(v) State.HoloShield = v; if v then CreateHoloShield() else DestroyHoloShield() end end, function() return State.HoloShield end)
+        AddFallbackToggle("360° Ragebot (Hostile Only)", State.Ragebot, function(v) State.Ragebot = v; if v then SetupGunControllerHooks() end end, function() return State.Ragebot end)
+        AddFallbackToggle("Silent Aim (Bullet Hook + Wallbang)", State.SilentAim, function(v) State.SilentAim = v; if v then SetupGunControllerHooks() end end, function() return State.SilentAim end)
+        AddFallbackToggle("Safe Melee Kill Aura", State.KillAura, function(v) State.KillAura = v end, function() return State.KillAura end)
+        AddFallbackToggle("Gun Mods (Rapid Fire + No Spread)", State.GunMods, function(v) State.GunMods = v; ApplyGunModsAll() end, function() return State.GunMods end)
+        AddFallbackToggle("Region-Safe MaxSpeed", State.MaxSpeed, function(v) State.MaxSpeed = v end, function() return State.MaxSpeed end)
+        AddFallbackToggle("Character Fly", State.Fly, function(v) State.Fly = v; if not v then Core.CleanupCharFly() end end, function() return State.Fly end)
+        AddFallbackToggle("Anti-Tase & Anti-Arrest", State.AntiTase, function(v) State.AntiTase = v; State.AntiArrest = v end, function() return State.AntiTase end)
+        AddFallbackToggle("Anti-CarBring (Block Seat Kidnap)", State.AntiCarBring, function(v) State.AntiCarBring = v end, function() return State.AntiCarBring end)
+        AddFallbackToggle("Auto-Arrest & Auto-Taze Aura", State.AutoArrest, function(v) State.AutoArrest = v; State.AutoTaze = v end, function() return State.AutoArrest end)
+        AddFallbackToggle("Role-Colored Player ESP", State.ESP, function(v) State.ESP = v end, function() return State.ESP end)
 
         local ToggleHubBtn = Instance.new("TextButton")
         ToggleHubBtn.Name = "PL2026_ToggleHubBtn"
         ToggleHubBtn.Size = UDim2.fromOffset(105, 34)
-        ToggleHubBtn.Position = UDim2.new(0.02, 0, 0.22, 0)
+        ToggleHubBtn.Position = UDim2.new(0.02, 0, 0.24, 0)
         ToggleHubBtn.BackgroundColor3 = Color3.fromRGB(30, 58, 138)
         ToggleHubBtn.Font = Enum.Font.GothamBold
         ToggleHubBtn.TextSize = 12
@@ -7348,6 +7571,7 @@ end
 -- // Cleanup Registration
 Env.PrisonLife2026Cleanup = function()
     Env.PrisonLife2026Running = false
+    Env.PrisonLife2026RunToken = nil
     pcall(RunService.UnbindFromRenderStep, RunService, "PL2026_ShieldRestore")
     if Core.CleanupCharFly then Core.CleanupCharFly() end
     if Core.StopFEInvisible then Core.StopFEInvisible() end
@@ -7375,6 +7599,15 @@ Env.PrisonLife2026Cleanup = function()
         if scopes.player then scopes.player:Clean() end
     end
     UpdateVehicleWheelAura(nil)
+    if UIRefs.WindUIWindow and UIRefs.WindUIWindow.Destroy then
+        pcall(function() UIRefs.WindUIWindow:Destroy() end)
+    end
+    if UIRefs.WindUI then
+        for _, k in ipairs({ "ScreenGui", "NotificationGui", "DropdownGui", "TooltipGui" }) do
+            local g = UIRefs.WindUI[k]
+            if g then pcall(function() g:Destroy() end) end
+        end
+    end
     if hookfunction then
         for _, pair in ipairs(HookedFunctions) do
             pcall(function() hookfunction(pair.fn, pair.orig) end)
@@ -7389,4 +7622,4 @@ Env.PrisonLife2026Cleanup = function()
 end
 
 App.Persistence.TryAutoLoad()
-Notify("Prison Life • 2026 Pro v7.0", "Loaded Apex KX Pro Edition (Scoped Engine + AntiCarBring + Kits)!", 3.5)
+Notify("Prison Life • 2026 Pro v7.1", "Loaded Apex KX Pro v7.1 (Fixed Startup/Mobile UI + Zero-Global Engine)!", 3.5)
